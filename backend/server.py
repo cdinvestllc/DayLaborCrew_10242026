@@ -197,6 +197,13 @@ async def startup_event():
     await bootstrap_privileged("super_admin", "SUPER_ADMIN_EMAIL", "SUPER_ADMIN_PASSWORD", "Super Administrator")
     await bootstrap_privileged("admin", "ADMIN_EMAIL", "ADMIN_PASSWORD", "Platform Admin")
 
+    if os.environ.get("SEED_DEMO_ACCOUNTS", "").lower() == "true":
+        try:
+            from seed_demo import seed_demo_accounts
+            await seed_demo_accounts()
+        except Exception as e:
+            logger.error(f"Demo seed failed: {e}")
+
     # Init default settings
     existing_settings = await db.settings.find_one({})
     if not existing_settings:

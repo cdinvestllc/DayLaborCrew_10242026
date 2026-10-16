@@ -141,7 +141,7 @@ export default function MapComponent({
       style: OSM_STYLE,
       center: toLngLat(userLocation) || US_CENTER,
       zoom: toLngLat(userLocation) ? 11 : 4,
-      maxBounds: [[-180, -85], [180, 85]],
+      maxBounds: [[-179.9, -85], [179.9, 85]], // full 360° span crashes maplibre 5.x (non-invertible matrix)
       attributionControl: true,
     });
 

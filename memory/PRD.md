@@ -94,3 +94,8 @@ Everything from Sessions 1-3 complete and tested.
 - Admin bootstrap only from strong env creds; admins can't grant admin/super_admin; OAuth blocked for admin roles.
 - Uploads → Emergent object storage, served at /api/public/files/... (magic-byte validated, 5MB). Legacy /uploads migrated at startup.
 - Tests: backend/tests/test_security.py (23 tests).
+
+## Session (2026-10) - Repo import + Demo Accounts
+- Imported cdinvestllc/DayLaborCrew_New10162026v2 (main); created backend/frontend .env; frontend/.yarnrc ignore-engines.
+- `backend/seed_demo.py` (startup, SEED_DEMO_ACCOUNTS=true): 3 verified contractors (Atlanta area), 2 crew, TEST20 coupon. Idempotent.
+- Fixed MapLibre 5.24 crash on dashboards/verified map: maxBounds full 360° span -> [-179.9,179.9].

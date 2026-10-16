@@ -163,7 +163,7 @@ function MapView({ contractors, onSelect, selected }) {
         },
         center: [-98.5795, 39.8283],
         zoom: 3.5,
-        maxBounds: [[-180, -85], [180, 85]],
+        maxBounds: [[-179.9, -85], [179.9, 85]], // full 360° span crashes maplibre 5.x
       });
       map.addControl(new maplibregl.NavigationControl(), "top-right");
       map.addControl(new maplibregl.GeolocateControl({ positionOptions: { enableHighAccuracy: true } }), "top-right");
