@@ -19,24 +19,31 @@ export function WebSocketProvider({ children }) {
 
   const active = useRef(false);
 
+  const connecting = useRef(false);
+
   const connect = useCallback(async () => {
-    if (!userId || ws.current?.readyState === WebSocket.OPEN) return;
+    if (!userId || connecting.current || (ws.current && ws.current.readyState <= WebSocket.OPEN)) return;
+    connecting.current = true;
     let ticket;
     try {
       ticket = (await axios.post(`${process.env.REACT_APP_BACKEND_URL}/api/ws/ticket`)).data.ticket;
     } catch {
       if (active.current) reconnectTimer.current = setTimeout(connect, 10000);
       return;
+    } finally {
+      connecting.current = false;
     }
-    if (!active.current) return;
-    ws.current = new WebSocket(`${WS_URL}/api/ws?ticket=${encodeURIComponent(ticket)}`);
+    if (!active.current || (ws.current && ws.current.readyState <= WebSocket.OPEN)) return;
+    const sock = new WebSocket(`${WS_URL}/api/ws?ticket=${encodeURIComponent(ticket)}`);
+    ws.current = sock;
 
-    ws.current.onopen = () => {
+    sock.onopen = () => {
+      if (ws.current !== sock) return;
       setConnected(true);
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
     };
 
-    ws.current.onmessage = (evt) => {
+    sock.onmessage = (evt) => {
       try {
         const data = JSON.parse(evt.data);
         setLastMessage(data);
@@ -44,14 +51,14 @@ export function WebSocketProvider({ children }) {
       } catch { }
     };
 
-    ws.current.onclose = (evt) => {
+    sock.onclose = (evt) => {
+      if (ws.current !== sock) return;
+      ws.current = null;
       setConnected(false);
-      if (active.current && evt.code !== 4003) reconnectTimer.current = setTimeout(connect, 3000);
+      if (active.current && evt.code !== 4003 && evt.code !== 4000) reconnectTimer.current = setTimeout(connect, 3000);
     };
 
-    ws.current.onerror = () => {
-      ws.current?.close();
-    };
+    sock.onerror = () => sock.close();
   }, [userId]);
 
   useEffect(() => {
@@ -60,7 +67,10 @@ export function WebSocketProvider({ children }) {
     return () => {
       active.current = false;
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
-      ws.current?.close();
+      const sock = ws.current;
+      ws.current = null;
+      sock?.close();
+      setConnected(false);
     };
   }, [userId, connect]);
 

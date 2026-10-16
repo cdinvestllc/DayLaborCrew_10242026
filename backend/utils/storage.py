@@ -106,3 +106,55 @@ async def load_image(path: str) -> tuple[bytes, str]:
     except requests.RequestException:
         raise HTTPException(status_code=404, detail="File not found")
     return data, record["content_type"]
+
+
+async def _store_bytes(data: bytes, owner_id: str, category: str) -> str | None:
+    detected = detect_image(data)
+    if not detected or len(data) > MAX_IMAGE_BYTES:
+        return None
+    ext, mime = detected
+    path = f"{APP_NAME}/{category}/{owner_id}/{uuid.uuid4().hex}.{ext}"
+    result = await asyncio.to_thread(_put, path, data, mime)
+    stored = result.get("path", path)
+    await db.files.insert_one({
+        "id": str(uuid.uuid4()), "storage_path": stored, "owner_id": owner_id, "category": category,
+        "content_type": mime, "size": len(data), "is_deleted": False,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    return FILE_URL_PREFIX + stored
+
+
+async def migrate_legacy_uploads(uploads_root) -> int:
+    """One-time move of pod-local /uploads/... images into object storage; idempotent."""
+    async def convert(url, owner, category):
+        if not isinstance(url, str) or not url.startswith("/uploads/"):
+            return url
+        local = uploads_root / url[len("/uploads/"):]
+        if ".." in url or not local.is_file():
+            return url
+        return await _store_bytes(local.read_bytes(), owner, category) or url
+
+    moved = 0
+    query = {"$or": [{f: {"$regex": "^/uploads/"}} for f in ("profile_photo", "logo", "portfolio")]}
+    async for user in db.users.find(query, {"_id": 0, "id": 1, "profile_photo": 1, "logo": 1, "portfolio": 1}):
+        update = {}
+        for field, cat in (("profile_photo", "profile_photos"), ("logo", "logos")):
+            new = await convert(user.get(field), user["id"], cat)
+            if new != user.get(field):
+                update[field] = new
+        portfolio = user.get("portfolio") or []
+        new_portfolio = [await convert(u, user["id"], "portfolio") for u in portfolio]
+        if new_portfolio != portfolio:
+            update["portfolio"] = new_portfolio
+        if update:
+            await db.users.update_one({"id": user["id"]}, {"$set": update})
+            moved += 1
+    settings = await db.settings.find_one({}, {"_id": 0, "site_logo": 1, "site_favicon": 1}) or {}
+    update = {}
+    for field in ("site_logo", "site_favicon"):
+        new = await convert(settings.get(field), "site", "cms")
+        if new != settings.get(field):
+            update[field] = new
+    if update:
+        await db.settings.update_one({}, {"$set": update})
+    return moved

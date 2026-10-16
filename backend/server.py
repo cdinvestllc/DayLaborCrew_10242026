@@ -14,7 +14,7 @@ load_dotenv(ROOT_DIR / '.env')
 
 from auth import hash_password, limiter, validate_password_strength, log_security_event  # noqa: E402
 from database import db  # noqa: E402
-from utils.storage import init_storage  # noqa: E402
+from utils.storage import init_storage, migrate_legacy_uploads  # noqa: E402
 
 for _var in ("MONGO_URL", "DB_NAME", "JWT_SECRET_KEY", "JWT_EXPIRE_HOURS", "CORS_ORIGINS", "EMERGENT_LLM_KEY", "TRUSTED_PROXY_HOPS"):
     if not os.environ.get(_var):
@@ -169,6 +169,9 @@ async def startup_event():
     try:
         init_storage()
         logger.info("Object storage initialized")
+        moved = await migrate_legacy_uploads(uploads_dir)
+        if moved:
+            logger.info(f"Migrated legacy uploads for {moved} users")
     except Exception as e:
         logger.error(f"Object storage init failed: {type(e).__name__}")
 

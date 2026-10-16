@@ -92,8 +92,8 @@ export default function App() {
     <ThemeProvider>
       <AuthProvider>
         <BrowserRouter>
-          <AppRoutes />
           <Toaster position="top-right" richColors />
+          <AppRoutes />
           <PWAInstallPrompt />
         </BrowserRouter>
       </AuthProvider>

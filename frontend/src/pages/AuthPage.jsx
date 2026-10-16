@@ -46,8 +46,8 @@ export default function AuthPage() {
   // Check for reset token in URL
   useEffect(() => {
     const oauthError = params.get("error");
-    if (oauthError === "oauth_forbidden") toast.error("This account can't use Google sign-in. Use email and password.");
-    else if (oauthError === "oauth_failed") toast.error("Google sign-in failed. Please try again.");
+    const oauthMsg = { oauth_forbidden: "This account can't use Google sign-in. Use email and password.", oauth_failed: "Google sign-in failed. Please try again." }[oauthError];
+    if (oauthMsg) setTimeout(() => toast.error(oauthMsg, { id: "oauth-error" }), 0);
     const token = params.get("token");
     if (token && params.get("mode") === "reset") {
       setResetToken(token);
@@ -162,7 +162,7 @@ export default function AuthPage() {
                       value={newPassword}
                       onChange={e => setNewPassword(e.target.value)}
                       className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-[#0000FF] dark:bg-slate-800 dark:text-white pr-10"
-                      placeholder="Min 6 characters" required data-testid="reset-password-input"
+                      placeholder="8+ chars, Aa, 1 & symbol" required data-testid="reset-password-input"
                     />
                     <button type="button" onClick={() => setShowPass(!showPass)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400">
                       {showPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
@@ -371,7 +371,7 @@ export default function AuthPage() {
               <div className="relative">
                 <input type={showPass ? "text" : "password"} value={form.password} onChange={e => update("password", e.target.value)}
                   className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-[#0000FF] dark:bg-slate-800 dark:text-white pr-10"
-                  placeholder="Min 6 characters" required data-testid="auth-password-input" />
+                  placeholder="8+ chars, Aa, 1 & symbol" required data-testid="auth-password-input" />
                 <button type="button" onClick={() => setShowPass(!showPass)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400">
                   {showPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>

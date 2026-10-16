@@ -83,3 +83,14 @@ Everything from Sessions 1-3 complete and tested.
 - Verified contractor analytics (page views, profile clicks in admin)
 - MapLibre satellite/terrain tile toggle on verified contractors page
 - Bulk revoke/grant verified status (admin select all)
+
+## Security Hardening (2026-06)
+- HttpOnly/Secure/SameSite=Lax session cookie `tdl_session` + double-submit CSRF (`tdl_csrf` cookie → `X-CSRF-Token` header). Bearer still accepted for API clients.
+- JWT: env-only secret (>=32 chars, fail on start), HS256 fixed, iss/aud/iat/nbf/exp/jti/tv/typ validated; DB role + active + token_version checked per request.
+- Logout revokes jti (`revoked_tokens`, TTL); logout-all / reset / suspend / role change bump `token_version` and close WS.
+- Reset tokens SHA-256 hashed, 1h TTL, atomic single-use; password policy 8-72 + upper/lower/digit/symbol.
+- WS: POST /api/ws/ticket → wss /api/ws?ticket= (60s, single use). /api/ws/online-users admin only.
+- Rate limits (slowapi, per-IP using TRUSTED_PROXY_HOPS) + per-account lockout (10 fails/15 min).
+- Admin bootstrap only from strong env creds; admins can't grant admin/super_admin; OAuth blocked for admin roles.
+- Uploads → Emergent object storage, served at /api/public/files/... (magic-byte validated, 5MB). Legacy /uploads migrated at startup.
+- Tests: backend/tests/test_security.py (23 tests).

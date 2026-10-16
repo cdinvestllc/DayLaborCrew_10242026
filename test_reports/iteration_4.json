@@ -1,0 +1,41 @@
+{
+  "summary": "Frontend-only regression of the security hardening (cookie session + CSRF, WS ticket, object-storage uploads, password policy, OAuth error toasts). 9 of 10 requested flows work: crew login sets an HttpOnly tdl_session cookie and tdl_token is not in localStorage, the session survives a reload, the availability toggle POSTs with X-CSRF-Token and gets 200, photo upload saves to /api/public/files/... and the image renders, logout clears the cookies and protected routes redirect to /auth, the contractor dashboard and Post Job modal load, super admin Users and Analytics load, JSON and CSV export download with toasts, and the Export tab is hidden for a normal admin. A weak password is rejected client-side and a strong one registers and lands on /crew/dashboard. WebSocket URLs are /api/ws?ticket=... with no JWT, and there is no infinite reconnect loop. Issues found: (1) the dashboard WS status stays 'Connecting...' even though a socket is open; (2) the oauth_failed toast does not show when /auth?error=oauth_failed is loaded directly (it does show after client-side navigation, which is what AuthCallback does); (3) some older images are broken because their URLs are /uploads/... paths, which reach the frontend and return HTML.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/uploads/* (legacy static mount)", "issue": "Older users' DB records still point to /uploads/logos/... and /uploads/profile_photos/... (e.g. contractor1 logo, micah.rowland photo). Paths without /api go to the frontend, which returns text/html, so avatars show broken-image icons on the contractor dashboard and navbar. The files still exist in /app/backend/uploads. Not caused by this change, but the move to object storage did not migrate them."},
+      {"endpoint": "Set-Cookie tdl_session", "issue": "The backend sets SameSite=lax, but the response the browser receives says 'SameSite=None; Partitioned' for tdl_session. The preview ingress probably rewrites HttpOnly cookies. tdl_csrf stays Lax. Production should be checked; the double-submit CSRF check still protects state-changing requests."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "WebSocketContext / CrewDashboard + ContractorDashboard status", "issue": "The status shows 'Connecting...' permanently (checked again after 12s) even though a WS is open. Cause: under React.StrictMode the effect runs twice, so connect() runs twice and 2 tickets and 2 sockets are created. The backend closes the older socket with code 4000, and that socket's onclose calls setConnected(false) without checking whether it is still ws.current. Fix: keep a local `const sock = new WebSocket(...)` and do nothing in onopen/onclose/onerror if `ws.current !== sock`. Also, after the ticket await, re-check `ws.current && ws.current.readyState <= 1` (CONNECTING or OPEN) to avoid a second socket. Optionally do not reconnect on close code 4000 (replaced).", "selector": "text=Connecting...", "priority": "MEDIUM"},
+      {"component": "AuthPage OAuth error toast", "issue": "Loading /auth?error=oauth_failed directly as a full page shows no toast. Cause: <Toaster> is rendered after <AppRoutes/> in App.js, so AuthPage's mount effect calls toast.error before the Toaster subscribes. Client-side navigation (how AuthCallback redirects) does show it, but twice under StrictMode. Fix: move <Toaster/> above <AppRoutes/> or wrap the call in setTimeout(...,0), and pass {id: 'oauth-error'} to avoid duplicates.", "selector": "[data-sonner-toast]", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "AuthPage", "issues": ["Password placeholders still say 'Min 6 characters' (auth-password-input, reset-password-input), but the policy is now 8-72 characters with upper, lower, digit and symbol. Update the placeholder or add a hint."]},
+      {"screen": "Navbar logout", "issues": ["handleLogout calls navigate('/') but the user ends up on /auth, because ProtectedRoute redirects first when user becomes null. Behavior is unchanged from before (not a regression); the request expected the landing page."]},
+      {"screen": "Admin Overview pie chart", "issues": ["'Crew: 4' label and legend are #0000FF on a dark background, so contrast is low."]},
+      {"screen": "Contractor Post Job modal", "issues": ["Uses the browser's native datetime-local pickers instead of the shadcn calendar (not caused by this change)."]}
+    ]
+  },
+  "test_report_links": [],
+  "action_items": [
+    "Fix the stale 'Connecting...' WS status in WebSocketContext.jsx: ignore events from sockets that are no longer ws.current, and avoid creating two sockets under StrictMode.",
+    "Make the OAuth error toast show on a direct full-page load: render <Toaster/> before <AppRoutes/> or defer the toast, and give it an id to avoid duplicates.",
+    "Migrate legacy '/uploads/...' profile_photo and logo URLs to object storage (/api/public/files/...), or serve them under /api/uploads.",
+    "Update the password input placeholders to match the new policy."
+  ],
+  "critical_code_review_comments": [
+    "WebSocketContext.connect: the guard `ws.current?.readyState === WebSocket.OPEN` misses the CONNECTING state and the time spent waiting for the ticket, so concurrent calls create duplicate sockets; old sockets' onclose handlers then overwrite the connected state.",
+    "AdminDashboard ExportTab uses fetch with credentials:'include' (GET), which is fine for CSRF since it is a GET.",
+    "AuthContext calls localStorage.removeItem('tdl_token') at module load, which is good cleanup for old tokens."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (frontend only)", "frontend": "90% (9/10 requested flows passed; oauth toast on direct load failed; WS status indicator incorrect)"},
+  "seed_data_creation": "Registered sec_ui_1792130445@example.com (crew) through the UI and then deleted it from the DB. testcrew's profile_photo now points to an object-storage URL from the upload test.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Used about 7 logins (rate limit 20/min). Useful testids: auth-email-input, auth-password-input, auth-submit-btn, availability-toggle, upload-photo-btn (hidden input[type=file][accept='image/*']), nav-logout (opens directly), admin-tab-users/admin-tab-export, export-json-btn/export-csv-btn, post-job-btn. Retest the 'Live updates active' text on /crew/dashboard after the WS fix, and the toast on a direct load of /auth?error=oauth_failed."
+}
