@@ -1,0 +1,1 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="0" skipped="0" tests="1" time="3.563" timestamp="2026-10-16T08:39:23.047394+00:00" hostname="agent-env-4a67af87-abda-4ea1-8230-83af5e108cfb"><testcase classname="tests.test_demo_login_cors" name="test_verified_contractors" time="3.512" /></testsuite></testsuites>

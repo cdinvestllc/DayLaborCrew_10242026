@@ -101,3 +101,28 @@
 #====================================================================================================
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
+user_problem_statement: "Demo accounts (3 verified contractors, 2 crew, admin, super admin, TEST20 coupon). User reported: can't login with demo accounts."
+backend:
+  - task: "Login works from alias preview domain (CORS + /api/auth/csrf)"
+    implemented: true
+    working: "NA"
+    file: "backend/.env (CORS_ORIGINS), backend/routes/auth_routes.py (GET /auth/csrf), backend/server.py (rejected-origin log)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: false
+        -agent: "user"
+        -comment: "Root cause: app opened at https://crew-workforce.preview.emergentagent.com, API is the id-based preview URL; CORS preflight returned 400 (origin not trusted). Also CSRF cookie unreadable cross-host. Fixed by trusting origin + CSRF lookup endpoint used by axios interceptor."
+frontend:
+  - task: "Demo account login + dashboard write actions from both preview URLs"
+    implemented: true
+    working: "NA"
+    file: "frontend/src/contexts/AuthContext.jsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "Interceptor falls back to GET /api/auth/csrf when tdl_csrf cookie unreadable; retries once on 'CSRF validation failed'."

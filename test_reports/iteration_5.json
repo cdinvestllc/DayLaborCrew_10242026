@@ -1,0 +1,37 @@
+{
+  "summary": "Retested the 'can't login with demo accounts' bug on the crew-workforce alias domain and on the id-based preview domain. Fixed: all 7 demo accounts log in through the UI on the alias domain and land on the right dashboard. Reload keeps the session (/users/me 200). Write actions on the alias domain send the CSRF token: crew availability toggle 200, contractor POST /api/jobs/ 201, logout 200, re-login OK. Admin Coupons tab lists TEST20 at 20%. Contractors 1-3 show the Verified banner, and /api/public/verified-contractors returns 3. TEST20 for contractor_pro: valid, 20%, 39.99 -> 31.99. Wrong password shows 'Invalid email or password' (2 bad attempts used on contractor3). CORS preflight: alias origin gets 200 with ACAO+credentials; evil.example.com gets no ACAO header. Backend 14/14 pass. 2 minor frontend bugs found, neither related to login.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/auth/logout", "issue": "Accepts a cookie-session request without an X-CSRF-Token header (returns 200). Logout CSRF is low risk, so this is informational only."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "AdminDashboard Coupons > Test a Coupon", "issue": "The 'Test Against Plan' select still has the old plan values daily/weekly/monthly. The backend PLANS are crew_monthly/crew_quarterly/crew_annual/contractor_basic/contractor_pro/contractor_business, so testing TEST20 always shows 'Invalid plan'.", "selector": "[data-testid='test-coupon-plan-select']", "priority": "MEDIUM"},
+      {"component": "ContractorDashboard My Jobs", "issue": "After a successful post (201 + 'Job posted!' toast), My Jobs still shows (0) until the page is reloaded. fetchJobs() is called after the post but the list doesn't update, possibly a stale or racing fetch.", "selector": "[data-testid='submit-job-btn']", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dark mode (contractor dashboard, admin coupons)", "issues": ["The Verified banner 'View Page' link, the 'Post your first job' link, the crew 'View' chips, the coupon code TEST20 in the table and the 'Test Coupon' outline button text are #0000FF on a near-black background, so contrast is very low", "Coupon table Used/Limit/Plan values are almost invisible", "The address autocomplete dropdown covers the 'Post Job Now' button until a suggestion is picked or the dropdown is dismissed"]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_demo_login_cors.py", "/app/test_reports/pytest/pytest_iter5.xml"],
+  "action_items": [
+    "Change the AdminDashboard test-coupon plan options to the real plan ids (crew_monthly ... contractor_business)",
+    "Refresh My Jobs immediately after a job is posted (await fetchJobs or add the returned job to state)",
+    "Fix dark-mode contrast for the #0000FF links and buttons (use a lighter blue, e.g. blue-400, in dark mode)",
+    "Close the address suggestions dropdown on blur so it doesn't cover the submit button"
+  ],
+  "critical_code_review_comments": [
+    "The /auth/csrf endpoint returns the csrf cookie value. It is protected only by CORS (no ACAO for untrusted origins, verified), so keep CORS_ORIGINS strict and never use a wildcard",
+    "The job post flow uses window.confirm. A native dialog is inconsistent with the rest of the UI; consider a shadcn AlertDialog"
+  ],
+  "updated_files": ["/app/backend/tests/test_demo_login_cors.py"],
+  "success_rate": {"backend": "100% (14/14)", "frontend": "~90% (login, redirect, reload and write actions on both domains pass; 2 minor UI bugs)"},
+  "test_credentials": "From /app/memory/test_credentials.md; all valid",
+  "seed_data_creation": "One TEST_ job was created by contractor2 and then deleted. testcrew availability was restored to Available (it was Unavailable before testing).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "The alias domain crew-workforce.preview.emergentagent.com calls the API on the id-based host. Login flow: input[type=email]/[type=password] + Enter. Posting a job needs a click on [data-testid=job-address-input-suggestion-0] and accepting the window.confirm dialog. The public verified list is at /api/public/verified-contractors."
+}
