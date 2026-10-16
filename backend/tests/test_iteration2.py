@@ -3,7 +3,7 @@ import pytest
 import requests
 import os
 
-BASE_URL = "https://crew-management-beta.preview.emergentagent.com"
+BASE_URL = "https://crew-workforce.preview.emergentagent.com"
 
 ADMIN_EMAIL = "admin@thedaylaborers.com"
 ADMIN_PASS = "Admin@123"
