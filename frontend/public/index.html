@@ -33,7 +33,15 @@
         <script>
           if ('serviceWorker' in navigator) {
             window.addEventListener('load', function() {
-              navigator.serviceWorker.register('/sw.js').catch(function() {});
+              navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).catch(function() {});
+            });
+            // When an updated service worker takes over, reload once so the latest app code runs
+            var hadController = !!navigator.serviceWorker.controller;
+            var reloaded = false;
+            navigator.serviceWorker.addEventListener('controllerchange', function() {
+              if (!hadController || reloaded) return;
+              reloaded = true;
+              window.location.reload();
             });
           }
         </script>

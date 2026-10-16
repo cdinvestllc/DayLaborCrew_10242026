@@ -443,6 +443,10 @@ async def get_settings(admin: dict = Depends(require_admin)):
 @router.put("/settings")
 async def update_settings(data: SettingsUpdate, request: Request, admin: dict = Depends(require_admin)):
     update = {k: v for k, v in data.model_dump().items() if v is not None}
+    if "emergency_job_price" in update:
+        if update["emergency_job_price"] < 0.5:
+            raise HTTPException(status_code=400, detail="Emergency fee must be at least $0.50")
+        update["emergency_job_price"] = round(float(update["emergency_job_price"]), 2)
     await db.settings.update_one({}, {"$set": update}, upsert=True)
     await log_activity(request, admin, "update_settings", details=str(update))
     return {"message": "Settings updated"}
@@ -938,15 +942,19 @@ async def admin_reset_password(user_id: str, request: Request, admin: dict = Dep
 @router.get("/settings/emergency-price")
 async def get_emergency_price(admin: dict = Depends(require_admin)):
     settings = await db.settings.find_one({}, {"_id": 0})
-    return {"emergency_job_price": (settings or {}).get("emergency_job_price", 9.99)}
+    return {"emergency_job_price": (settings or {}).get("emergency_job_price", 2.99)}
 
 
 @router.put("/settings/emergency-price")
 async def set_emergency_price(request: Request, admin: dict = Depends(require_admin)):
     body = await request.json()
     price = body.get("price")
-    if price is None or float(price) < 0:
+    try:
+        price = round(float(price), 2)
+    except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="Valid price required")
+    if price < 0.5:
+        raise HTTPException(status_code=400, detail="Emergency fee must be at least $0.50")
     await db.settings.update_one({}, {"$set": {"emergency_job_price": float(price)}})
     await log_activity(request, admin, "update_emergency_price", details=f"Price set to ${price}")
     return {"message": "Emergency price updated", "emergency_job_price": float(price)}

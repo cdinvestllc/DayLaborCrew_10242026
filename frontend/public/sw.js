@@ -1,6 +1,8 @@
-/* TheDayLaborers Service Worker v2.0 — Offline + Push */
-const CACHE_NAME = "daylaborers-v2";
-const API_CACHE = "daylaborers-api-v2";
+/* TheDayLaborers Service Worker v3.0 — Offline + Push */
+// v3: app shell & bundles are network-first so users always get the latest release
+// (stale-while-revalidate kept serving an old bundle, e.g. one without current CSRF handling).
+const CACHE_NAME = "daylaborers-v3";
+const API_CACHE = "daylaborers-api-v3";
 
 const STATIC_ASSETS = ["/", "/manifest.json", "/offline.html"];
 
@@ -58,17 +60,20 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // Static assets: stale-while-revalidate
+  // Only handle same-origin static assets; everything else goes straight to the network
+  if (url.origin !== self.location.origin) return;
+
+  // App shell + static assets: network-first, cached copy only when offline
   event.respondWith(
-    caches.match(event.request).then(cached => {
-      const network = fetch(event.request).then(res => {
+    fetch(event.request)
+      .then(res => {
         if (res.ok) {
-          caches.open(CACHE_NAME).then(c => c.put(event.request, res.clone()));
+          const clone = res.clone();
+          caches.open(CACHE_NAME).then(c => c.put(event.request, clone));
         }
         return res;
-      });
-      return cached || network;
-    })
+      })
+      .catch(() => caches.match(event.request).then(cached => cached || caches.match("/")))
   );
 });
 

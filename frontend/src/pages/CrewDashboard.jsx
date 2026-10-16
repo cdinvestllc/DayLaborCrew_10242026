@@ -131,7 +131,9 @@ export default function CrewDashboard() {
   const [view, setView] = useState("map");
   const [jobs, setJobs] = useState([]);
   const [myJobs, setMyJobs] = useState([]);
-  const [userLocation, setUserLocation] = useState(null);
+  // Start from the saved profile location; browser geolocation refines it if allowed
+  const [userLocation, setUserLocation] = useState(() =>
+    user?.location?.lat != null && user?.location?.lng != null ? { lat: user.location.lat, lng: user.location.lng } : null);
   const [loading, setLoading] = useState(true);
   const [tradeFilter, setTradeFilter] = useState("All");
   const [trades, setTrades] = useState(["All"]);

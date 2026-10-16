@@ -66,13 +66,19 @@ export default function ContractorDashboard() {
   const [ratingJob, setRatingJob] = useState(null);
   const [offerCrew, setOfferCrew] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [userLocation, setUserLocation] = useState(null);
+  // Start from the saved business location; browser geolocation refines it if allowed
+  const [userLocation, setUserLocation] = useState(() =>
+    user?.location?.lat != null && user?.location?.lng != null ? { lat: user.location.lat, lng: user.location.lng } : null);
   const [flyToCoords, setFlyToCoords] = useState(null);
   const [selectedState, setSelectedState] = useState("");
   const [boostJob, setBoostJob] = useState(null);
   const [verifiedFee, setVerifiedFee] = useState(39.99);
   const [verifiedLoading, setVerifiedLoading] = useState(false);
   const [pollingVerified, setPollingVerified] = useState(false);
+  const [emergencyFee, setEmergencyFee] = useState(2.99);
+  const [payingJobId, setPayingJobId] = useState(null);
+  const [pollingEmergency, setPollingEmergency] = useState(false);
+  const [postingJob, setPostingJob] = useState(false);
   const [jobForm, setJobForm] = useState({
     title: "", description: "", trade: "", crew_needed: 1,
     start_time: "", end_time: "", pay_rate: "", address: "", is_emergency: false, lat: null, lng: null, city: "", state: "", images: []
@@ -108,6 +114,7 @@ export default function ContractorDashboard() {
     });
     // Fetch verified contractor fee
     axios.get(`${API}/payments/verified-contractor/fee`).then(r => setVerifiedFee(r.data.fee)).catch(() => {});
+    axios.get(`${API}/payments/emergency/fee`).then(r => setEmergencyFee(r.data.fee)).catch(() => {});
   }, [fetchJobs, fetchCrew]);
 
   // Poll verified contractor payment status when redirected back
@@ -133,6 +140,62 @@ export default function ContractorDashboard() {
     };
     poll();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Emergency Job Start payment: confirm when returning from Stripe checkout
+  useEffect(() => {
+    const sessionId = searchParams.get("emergency_session");
+    const cancelled = searchParams.get("emergency_cancelled");
+    if (cancelled) {
+      toast.info("Payment cancelled. Your emergency job is saved - pay anytime from My Jobs to publish it.");
+      setSearchParams({});
+      return;
+    }
+    if (!sessionId) return;
+    setPollingEmergency(true);
+    let attempts = 0;
+    const poll = async () => {
+      try {
+        const res = await axios.get(`${API}/payments/emergency/status/${sessionId}`);
+        if (res.data.published) {
+          toast.success("Payment received! Your emergency job is live and crew are being alerted.");
+          setPollingEmergency(false);
+          setSearchParams({});
+          fetchJobs();
+          return;
+        }
+        if (res.data.status === "expired") {
+          setPollingEmergency(false);
+          setSearchParams({});
+          toast.error("Checkout expired. Pay again from My Jobs to publish your emergency job.");
+          return;
+        }
+      } catch { /* retry below */ }
+      attempts++;
+      if (attempts < 8) setTimeout(poll, 2000);
+      else { setPollingEmergency(false); setSearchParams({}); fetchJobs(); toast.error("Payment status unknown. Refresh in a moment to check your job."); }
+    };
+    poll();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const startEmergencyCheckout = async (jobId) => {
+    setPayingJobId(jobId);
+    try {
+      const res = await axios.post(`${API}/payments/emergency/stripe/${jobId}`, { origin_url: window.location.origin });
+      window.location.href = res.data.url;
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Could not start emergency checkout");
+      setPayingJobId(null);
+    }
+  };
+
+  const deletePendingJob = async (jobId) => {
+    if (!window.confirm("Delete this unpaid emergency job?")) return;
+    try {
+      await axios.delete(`${API}/jobs/${jobId}`);
+      setJobs(prev => prev.filter(j => j.id !== jobId));
+      toast.success("Unpaid job deleted");
+    } catch (e) { toast.error(e?.response?.data?.detail || "Failed to delete job"); }
+  };
 
   useEffect(() => {
     const remove = addListener(msg => {
@@ -161,22 +224,37 @@ export default function ContractorDashboard() {
 
   const createJob = async (e) => {
     e?.preventDefault();
-    if (!window.confirm(`Publish "${jobForm.title}" now? Crew will be notified immediately.`)) return;
+    if (postingJob) return;
     if (jobForm.end_time && jobForm.start_time && new Date(jobForm.end_time) <= new Date(jobForm.start_time)) {
       return toast.error("End time must be after start time");
     }
+    const confirmMsg = jobForm.is_emergency
+      ? `Post "${jobForm.title}" as an EMERGENCY job? You'll pay a one-time $${emergencyFee.toFixed(2)} Emergency Job Start fee, then crew are alerted immediately.`
+      : `Publish "${jobForm.title}" now? Crew will be notified immediately.`;
+    if (!window.confirm(confirmMsg)) return;
+    setPostingJob(true);
     try {
-      await axios.post(`${API}/jobs/`, {
+      const res = await axios.post(`${API}/jobs/`, {
         ...jobForm,
         crew_needed: Number(jobForm.crew_needed),
         pay_rate: Number(jobForm.pay_rate)
       });
-      toast.success("Job posted! Workers will be notified instantly.");
+      const newJob = res.data;
+      // Show the new job right away, then sync with the server
+      setJobs(prev => [newJob, ...prev.filter(j => j.id !== newJob.id)]);
       setShowJobForm(false);
       setJobForm({ title: "", description: "", trade: "", crew_needed: 1, start_time: "", end_time: "", pay_rate: "", address: "", is_emergency: false, lat: null, lng: null, city: "", state: "", images: [] });
-      fetchJobs();
+      if (newJob.requires_payment) {
+        toast.info("Job saved. Redirecting to secure checkout for the Emergency Job Start fee...");
+        await startEmergencyCheckout(newJob.id);
+      } else {
+        toast.success("Job posted! Workers will be notified instantly.");
+        fetchJobs();
+      }
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Failed to post job");
+    } finally {
+      setPostingJob(false);
     }
   };
 
@@ -250,6 +328,16 @@ export default function ContractorDashboard() {
       {offerCrew && <OfferCrewModal crew={offerCrew} jobs={jobs} onClose={() => setOfferCrew(null)} />}
 
       <div className="max-w-[1400px] mx-auto px-4 py-4">
+
+        {pollingEmergency && (
+          <div className="mb-4 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 rounded-xl p-4 flex items-center gap-3" data-testid="polling-emergency-banner">
+            <Loader2 className="w-5 h-5 text-red-600 dark:text-red-400 animate-spin flex-shrink-0" />
+            <div>
+              <p className="font-bold text-[#050A30] dark:text-white text-sm">Confirming your emergency payment...</p>
+              <p className="text-slate-500 dark:text-slate-400 text-xs">Your job goes live as soon as the payment is verified.</p>
+            </div>
+          </div>
+        )}
 
         {/* Verified Contractor Banner */}
         {pollingVerified && (
@@ -432,7 +520,22 @@ export default function ContractorDashboard() {
               ) : jobs.map(job => (
                 <div key={job.id}>
                   <JobCard job={job} onStart={startJob} onVerify={verifyJob} onRate={setRatingJob} currentUser={user} />
-                  {!["completed", "cancelled", "completed_pending_review"].includes(job.status) && (
+                  {job.status === "pending_payment" && (
+                    <div className="flex gap-2 mt-1 px-1" data-testid={`pending-payment-actions-${job.id}`}>
+                      <button onClick={() => startEmergencyCheckout(job.id)} disabled={payingJobId === job.id}
+                        className="flex-[2] flex items-center justify-center gap-1 py-1.5 text-xs font-bold text-white bg-red-600 hover:bg-red-700 rounded-lg disabled:opacity-60"
+                        data-testid={`pay-emergency-${job.id}`}>
+                        {payingJobId === job.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <AlertTriangle className="w-3.5 h-3.5" />}
+                        Pay ${emergencyFee.toFixed(2)} to publish
+                      </button>
+                      <button onClick={() => deletePendingJob(job.id)}
+                        className="flex-1 flex items-center justify-center gap-1 py-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-700"
+                        data-testid={`delete-pending-${job.id}`}>
+                        <XCircle className="w-3.5 h-3.5" /> Delete
+                      </button>
+                    </div>
+                  )}
+                  {!["completed", "cancelled", "completed_pending_review", "pending_payment"].includes(job.status) && (
                     <div className="flex gap-2 mt-1 px-1 flex-wrap">
                       {!job.is_featured && (
                         <button onClick={() => setBoostJob(job)}
@@ -485,9 +588,15 @@ export default function ContractorDashboard() {
                 <button type="button" onClick={() => updateForm("is_emergency", true)}
                   className={`flex-1 py-2.5 rounded-lg font-bold text-sm border-2 flex items-center justify-center gap-1 transition-colors ${jobForm.is_emergency ? "bg-yellow-400 text-[#050A30] border-yellow-400" : "bg-white dark:bg-slate-800 text-slate-500 border-slate-200"}`}
                   data-testid="emergency-job-btn">
-                  <AlertTriangle className="w-4 h-4" /> Emergency
+                  <AlertTriangle className="w-4 h-4" /> Emergency · ${emergencyFee.toFixed(2)}
                 </button>
               </div>
+              {jobForm.is_emergency && (
+                <div className="flex items-start gap-2 rounded-lg border border-yellow-300 bg-yellow-50 dark:bg-yellow-900/20 dark:border-yellow-700 p-3 text-xs text-[#050A30] dark:text-yellow-100" data-testid="emergency-fee-note">
+                  <AlertTriangle className="w-4 h-4 text-yellow-600 dark:text-yellow-400 flex-shrink-0 mt-0.5" />
+                  <span>A one-time <strong>${emergencyFee.toFixed(2)} Emergency Job Start</strong> fee applies. Your job is saved first, then goes live with priority alerts to nearby crew as soon as payment is complete.</span>
+                </div>
+              )}
 
               <div>
                 <label className="block text-sm font-semibold text-[#050A30] dark:text-white mb-1">Job Title *</label>
@@ -564,10 +673,10 @@ export default function ContractorDashboard() {
                   data-testid="cancel-job-btn">
                   Cancel
                 </button>
-                <button type="submit"
-                  className="flex-[2] bg-[#0000FF] text-white py-3 rounded-xl font-bold hover:bg-blue-700 transition-colors"
+                <button type="submit" disabled={postingJob}
+                  className="flex-[2] bg-[#0000FF] text-white py-3 rounded-xl font-bold hover:bg-blue-700 transition-colors disabled:opacity-60"
                   data-testid="submit-job-btn">
-                  Post Job Now
+                  {postingJob ? "Posting..." : jobForm.is_emergency ? `Pay $${emergencyFee.toFixed(2)} & Post` : "Post Job Now"}
                 </button>
               </div>
             </form>

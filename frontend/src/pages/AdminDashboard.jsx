@@ -1925,7 +1925,13 @@ export default function AdminDashboard() {
   };
 
   const saveSettings = async () => {
-    await axios.put(`${API}/admin/settings`, editSettings);
+    try {
+      await axios.put(`${API}/admin/settings`, editSettings);
+    } catch (e) {
+      const d = e?.response?.data?.detail;
+      toast.error(typeof d === "string" ? d : "Failed to save settings");
+      return;
+    }
     toast.success("Settings saved");
     setSettings(editSettings);
   };
@@ -2228,12 +2234,12 @@ export default function AdminDashboard() {
               ))}
 
               <div>
-                <label className="block text-sm font-semibold text-[#050A30] dark:text-white mb-1.5">Emergency Job Price ($)</label>
-                <input type="number" step="0.01" value={editSettings.emergency_job_price || ""}
+                <label className="block text-sm font-semibold text-[#050A30] dark:text-white mb-1.5">Emergency Job Start Fee ($)</label>
+                <input type="number" step="0.01" min="0.5" value={editSettings.emergency_job_price ?? ""}
                   onChange={e => setEditSettings(s => ({ ...s, emergency_job_price: parseFloat(e.target.value) }))}
                   className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-[#0000FF] dark:bg-slate-800 dark:text-white"
                   data-testid="settings-emergency-price" />
-                <p className="text-xs text-slate-400 mt-1">One-time fee required for contractors to post emergency jobs</p>
+                <p className="text-xs text-slate-400 mt-1">One-time fee contractors pay (via Stripe) before an emergency job goes live. Default $2.99, minimum $0.50.</p>
               </div>
 
               <div>

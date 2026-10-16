@@ -86,3 +86,22 @@ h1, h2, h3, h4, h5, h6 {
 .dark .badge-open { background: #166534; color: #DCFCE7; }
 .dark .badge-fulfilled { background: #854D0E; color: #FEF9C3; }
 .dark .badge-in_progress { background: #1E40AF; color: #DBEAFE; }
+
+/* ─── Dark mode contrast ─────────────────────────────────────────────────────
+   Brand blue #0000FF is ~2:1 on the near-black dark background. In dark mode,
+   blue text/links/outlines switch to a lighter brand blue (~7:1). Solid blue
+   buttons (bg-[#0000FF] + white text) are unchanged. */
+.dark .text-\[\#0000FF\] { color: #8FA8FF; }
+.dark .hover\:text-\[\#0000FF\]:hover,
+.dark .hover\:text-blue-700:hover,
+.dark .hover\:text-blue-800:hover { color: #B8C8FF; }
+.dark .border-\[\#0000FF\] { border-color: #8FA8FF; }
+.dark .border-\[\#0000FF\]\/30 { border-color: rgba(143, 168, 255, 0.35); }
+.dark .text-blue-600 { color: #7FB0FF; }
+.dark .text-blue-700 { color: #9CC2FF; }
+.dark .hover\:bg-blue-50:hover { background-color: rgba(99, 132, 255, 0.16); }
+.dark .focus\:border-\[\#0000FF\]:focus { border-color: #8FA8FF; }
+/* Keep the original blue where the element sits on its own white surface */
+.dark .bg-white.text-\[\#0000FF\] { color: #0000FF; }
+/* Table cells with no explicit text colour inherit a readable light tone */
+.dark td:not([class*="text-"]) { color: #E2E8F0; }

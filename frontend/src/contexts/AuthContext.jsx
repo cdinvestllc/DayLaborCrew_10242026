@@ -26,8 +26,9 @@ const fetchCsrf = () => {
 axios.interceptors.request.use(async (config) => {
   const method = (config.method || "get").toUpperCase();
   if (!SAFE.includes(method)) {
+    // Session-bound token from the server wins; the readable cookie is a fallback (same value when present)
     const cookie = readCookie("tdl_csrf");
-    let csrf = cookie ? decodeURIComponent(cookie) : csrfCache;
+    let csrf = csrfCache || (cookie ? decodeURIComponent(cookie) : null);
     if (!csrf && !SESSION_CHANGING.test(config.url || "")) csrf = await fetchCsrf();
     if (csrf) config.headers["X-CSRF-Token"] = csrf;
   }
@@ -35,7 +36,7 @@ axios.interceptors.request.use(async (config) => {
 });
 axios.interceptors.response.use(
   (res) => {
-    if (SESSION_CHANGING.test(res.config?.url || "")) csrfCache = null;
+    if (SESSION_CHANGING.test(res.config?.url || "")) csrfCache = res.data?.csrf_token || null;
     return res;
   },
   async (error) => {
@@ -95,7 +96,7 @@ export function AuthProvider({ children }) {
 
   const logout = useCallback(async () => {
     setUser(null);
-    if (window.caches) window.caches.delete("daylaborers-api-v2").catch(() => {});
+    if (window.caches) window.caches.delete("daylaborers-api-v3").catch(() => {});
     try { await axios.post(`${API}/auth/logout`); } catch { }
   }, []);
 

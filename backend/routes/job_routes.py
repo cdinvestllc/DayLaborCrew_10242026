@@ -50,8 +50,10 @@ async def create_job(data: JobCreate, current_user: dict = Depends(get_current_u
         "end_time": data.end_time,
         "pay_rate": data.pay_rate,
         "location": location,
-        "status": "open",
-        "is_emergency": data.is_emergency,
+        # Emergency jobs stay hidden from crew until the one-time emergency fee is paid
+        "status": "pending_payment" if data.is_emergency else "open",
+        "is_emergency": bool(data.is_emergency),
+        "emergency_paid": False,
         "created_at": now_str(),
         "completed_at": None,
         "rated_crew": [],
@@ -61,19 +63,25 @@ async def create_job(data: JobCreate, current_user: dict = Depends(get_current_u
     }
 
     await db.jobs.insert_one(job_doc)
+    job_doc.pop("_id", None)
 
-    # Broadcast via WebSocket
+    if job_doc["status"] == "pending_payment":
+        from routes.payment_routes import get_emergency_price
+        return {**job_doc, "requires_payment": True, "emergency_fee": await get_emergency_price()}
+
+    await publish_job(job_doc)
+    return job_doc
+
+
+async def publish_job(job_doc: dict):
+    """Announces a live job: WebSocket broadcast + background AI crew matching."""
     try:
         from routes.ws_routes import manager
         await manager.broadcast_new_job(job_doc)
     except Exception as e:
         logger.warning(f"WS broadcast failed: {e}")
-
-    # Trigger AI matching in background (non-blocking)
     import asyncio
     asyncio.create_task(_run_ai_match(job_doc))
-
-    return {k: v for k, v in job_doc.items() if k != "_id"}
 
 
 def _validated_job_images(images, user_id: str) -> list:
@@ -141,6 +149,9 @@ async def get_job(job_id: str, current_user: dict = Depends(get_current_user)):
     job = await db.jobs.find_one({"id": job_id}, {"_id": 0})
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("status") == "pending_payment" and job["contractor_id"] != current_user["id"] \
+            and current_user["role"] not in ("admin", "super_admin"):
+        raise HTTPException(status_code=404, detail="Job not found")
     return job
 
 
@@ -156,6 +167,8 @@ async def update_job(job_id: str, data: JobUpdate, current_user: dict = Depends(
 
     update = {k: v for k, v in data.model_dump().items() if v is not None}
     update.pop("status", None)  # status changes only through workflow endpoints
+    if update.get("is_emergency") and not job.get("is_emergency") and current_user["role"] not in ("admin", "super_admin"):
+        raise HTTPException(status_code=400, detail="Emergency status requires the emergency fee. Post a new emergency job instead.")
     if "crew_needed" in update:
         if update["crew_needed"] < max(1, len(job.get("crew_accepted", []))):
             raise HTTPException(status_code=400, detail="Crew needed cannot be less than crew already accepted")

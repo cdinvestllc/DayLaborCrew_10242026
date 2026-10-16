@@ -154,11 +154,23 @@ async def authenticate_token(token: str) -> tuple[dict, Dict]:
     return user, payload
 
 
+def csrf_token_for(payload: Optional[Dict]) -> Optional[str]:
+    """CSRF token bound to the session (HMAC of its jti). It survives contexts where the browser
+    drops the readable CSRF cookie (embedded previews / alias domains), and can't be forged cross-site."""
+    if not payload or not payload.get("jti"):
+        return None
+    return hmac.new(SECRET_KEY.encode(), f"csrf:{payload['jti']}".encode(), hashlib.sha256).hexdigest()
+
+
+def session_csrf(token: str) -> Optional[str]:
+    return csrf_token_for(decode_token(token)) if token else None
+
+
 def issue_session(response: Response, user: dict) -> str:
     token = create_token({"sub": user["id"], "role": user["role"]}, user.get("token_version", 0))
     max_age = EXPIRE_HOURS * 3600
     response.set_cookie(SESSION_COOKIE, token, max_age=max_age, httponly=True, secure=True, samesite="lax", path="/")
-    response.set_cookie(CSRF_COOKIE, secrets.token_urlsafe(32), max_age=max_age, httponly=False, secure=True, samesite="lax", path="/")
+    response.set_cookie(CSRF_COOKIE, session_csrf(token), max_age=max_age, httponly=False, secure=True, samesite="lax", path="/")
     return token
 
 
@@ -180,8 +192,13 @@ async def get_current_user(request: Request, credentials: Optional[HTTPAuthoriza
     if from_cookie and request.method not in SAFE_METHODS:
         sent = request.headers.get(CSRF_HEADER, "")
         expected = request.cookies.get(CSRF_COOKIE, "")
-        if not sent or not expected or not hmac.compare_digest(sent, expected):
-            log_security_event("csrf_rejected", request, path=request.url.path)
+        bound = session_csrf(token) or ""
+        ok = bool(sent) and ((expected and hmac.compare_digest(sent, expected)) or (bound and hmac.compare_digest(sent, bound)))
+        if not ok:
+            log_security_event("csrf_rejected", request, path=request.url.path,
+                               header=bool(sent), cookie=bool(expected),
+                               origin=request.headers.get("origin", "-"),
+                               csrf_cookies=request.headers.get("cookie", "").count(f"{CSRF_COOKIE}="))
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="CSRF validation failed")
     user, payload = await authenticate_token(token)
     request.state.token_payload = payload

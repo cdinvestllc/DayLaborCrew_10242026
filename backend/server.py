@@ -36,8 +36,12 @@ async def security_headers(request: Request, call_next):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
-    if request.url.path.startswith("/api/auth") or request.url.path.startswith("/api/users/me"):
+    path = request.url.path
+    if path.startswith("/api/auth") or path.startswith("/api/users/me"):
         response.headers["Cache-Control"] = "no-store"
+    elif path.startswith("/api/") and not path.startswith("/api/public/files") and not path.startswith("/api/uploads"):
+        # Live data (jobs, notifications...) must never be served from a browser/HTTP cache
+        response.headers.setdefault("Cache-Control", "no-store")
     return response
 
 api_router = APIRouter(prefix="/api")
@@ -225,9 +229,12 @@ async def startup_event():
             "site_name": "TheDayLaborers",
             "site_tagline": "A Blue Collar ME Company",
             "site_logo": None,
-            "site_favicon": None
+            "site_favicon": None,
+            "emergency_job_price": 2.99,
         })
         logger.info("Default settings created")
+    else:
+        await db.settings.update_one({"emergency_job_price": {"$exists": False}}, {"$set": {"emergency_job_price": 2.99}})
 
     # Init default trades
     existing_trades = await db.trades.count_documents({})

@@ -38,7 +38,8 @@ def trial_end(days: int = 30) -> str:
 
 
 def session_body(token: str, user: dict) -> dict:
-    return {"access_token": token, "token_type": "bearer", "user": user_to_response(user)}
+    from auth import session_csrf
+    return {"access_token": token, "token_type": "bearer", "user": user_to_response(user), "csrf_token": session_csrf(token)}
 
 
 async def unique_referral_code() -> str:
@@ -173,8 +174,8 @@ async def login(data: UserLogin, request: Request, response: Response):
 async def get_csrf(request: Request):
     """Returns the caller's CSRF cookie value for frontends served from another (trusted) origin,
     where document.cookie can't read the API host's cookie. CORS keeps untrusted origins from reading it."""
-    from auth import CSRF_COOKIE
-    return {"csrf_token": request.cookies.get(CSRF_COOKIE)}
+    from auth import CSRF_COOKIE, SESSION_COOKIE, session_csrf
+    return {"csrf_token": session_csrf(request.cookies.get(SESSION_COOKIE, "")) or request.cookies.get(CSRF_COOKIE)}
 
 
 @router.post("/logout")

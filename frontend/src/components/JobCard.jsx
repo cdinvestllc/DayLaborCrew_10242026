@@ -7,7 +7,10 @@ const STATUS_COLORS = {
   in_progress: "bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300",
   completed_pending_review: "bg-orange-100 text-orange-700",
   completed: "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400",
+  pending_payment: "bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300",
 };
+
+const STATUS_LABELS = { pending_payment: "awaiting payment" };
 
 const TRADE_COLORS = {
   carpentry: "bg-amber-100 text-amber-800",
@@ -50,7 +53,7 @@ export default function JobCard({ job, onAccept, onStart, onComplete, onVerify, 
               </span>
             )}
             <span className={`text-xs font-semibold px-2 py-0.5 rounded-full capitalize ${STATUS_COLORS[job.status] || "bg-gray-100 text-gray-600"}`}>
-              {job.status?.replace("_", " ")}
+              {STATUS_LABELS[job.status] || job.status?.replaceAll("_", " ")}
             </span>
           </div>
           <h3 className="font-bold text-[#050A30] dark:text-white text-base leading-tight truncate" style={{ fontFamily: "Manrope, sans-serif" }}>

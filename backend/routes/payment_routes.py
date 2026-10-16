@@ -313,6 +313,7 @@ async def stripe_webhook(request: Request):
         event = await stripe.handle_webhook(body, request.headers.get("Stripe-Signature", ""))
         if event.payment_status == "paid":
             await fulfill_subscription_tx(event.session_id)
+            await fulfill_emergency_tx(event.session_id)
     except Exception as e:
         logger.warning(f"Stripe webhook error: {e}")
     return {"status": "ok"}
@@ -820,3 +821,83 @@ async def guest_job_status(session_id: str, request: Request):
         except Exception:
             pass
     return {"payment_status": "paid", "published": True, "job_id": job_id if claimed else (await db.guest_jobs.find_one({"id": guest["id"]}))["job_id"]}
+
+
+# ─── Emergency Job Start fee (one-time, admin-configurable, Stripe) ──────────
+
+DEFAULT_EMERGENCY_FEE = 2.99
+
+
+async def get_emergency_price() -> float:
+    settings = await db.settings.find_one({}, {"_id": 0, "emergency_job_price": 1}) or {}
+    try:
+        price = float(settings.get("emergency_job_price", DEFAULT_EMERGENCY_FEE))
+    except (TypeError, ValueError):
+        price = DEFAULT_EMERGENCY_FEE
+    return round(price, 2) if price >= 0.5 else DEFAULT_EMERGENCY_FEE
+
+
+@router.get("/emergency/fee")
+async def emergency_fee():
+    """Public: current one-time fee to start an emergency job."""
+    return {"fee": await get_emergency_price()}
+
+
+async def fulfill_emergency_tx(session_id: str) -> dict | None:
+    """Publishes the emergency job exactly once for a paid, server-verified transaction."""
+    tx = await db.payment_transactions.find_one_and_update(
+        {"session_id": session_id, "plan": "emergency_job", "payment_status": {"$ne": "paid"}},
+        {"$set": {"payment_status": "paid", "updated_at": now_str()}})
+    if not tx:
+        return None
+    job = await db.jobs.find_one_and_update(
+        {"id": tx["job_id"], "status": "pending_payment"},
+        {"$set": {"status": "open", "emergency_paid": True, "emergency_paid_at": now_str(),
+                  "emergency_fee_paid": tx.get("amount"), "published_at": now_str()}},
+        projection={"_id": 0}, return_document=True)
+    if job:
+        from routes.job_routes import publish_job
+        await publish_job(job)
+    return job
+
+
+@router.post("/emergency/stripe/{job_id}")
+async def emergency_checkout(job_id: str, request: Request, current_user: dict = Depends(get_current_user)):
+    job = await db.jobs.find_one({"id": job_id}, {"_id": 0})
+    if not job or job["contractor_id"] != current_user["id"]:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.get("is_emergency") or job.get("status") != "pending_payment":
+        raise HTTPException(status_code=400, detail="This job doesn't need an emergency payment")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    origin = _origin(request, body)
+    fee = await get_emergency_price()
+    session = await _stripe_checkout(
+        request, origin, fee,
+        success_url=f"{origin}/contractor/dashboard?emergency_session={{CHECKOUT_SESSION_ID}}",
+        cancel_url=f"{origin}/contractor/dashboard?emergency_cancelled={job_id}",
+        metadata={"user_id": current_user["id"], "job_id": job_id, "type": "emergency_job", "payment_method": "stripe"})
+    await db.payment_transactions.insert_one({
+        "id": str(uuid.uuid4()), "user_id": current_user["id"], "session_id": session.session_id,
+        "job_id": job_id, "amount": fee, "currency": "usd", "plan": "emergency_job",
+        "payment_method": "stripe", "payment_status": "pending", "created_at": now_str()})
+    return {"url": session.url, "session_id": session.session_id, "fee": fee}
+
+
+@router.get("/emergency/status/{session_id}")
+async def emergency_status(session_id: str, current_user: dict = Depends(get_current_user)):
+    tx = await get_owned_tx(session_id, current_user)
+    if not tx or tx.get("plan") != "emergency_job":
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if tx.get("payment_status") == "paid":
+        return {"payment_status": "paid", "published": True, "job_id": tx["job_id"]}
+    stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url="")
+    status = await stripe.get_checkout_status(session_id)
+    if status.payment_status == "paid" and status.metadata.get("job_id") == tx["job_id"]:
+        await fulfill_emergency_tx(session_id)
+        return {"payment_status": "paid", "published": True, "job_id": tx["job_id"]}
+    if status.status == "expired":
+        await db.payment_transactions.update_one({"session_id": session_id}, {"$set": {"payment_status": "expired"}})
+    return {"payment_status": status.payment_status, "status": status.status, "published": False, "job_id": tx["job_id"]}
