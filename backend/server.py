@@ -91,6 +91,15 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def log_rejected_origins(request: Request, call_next):
+    """Outermost: records cross-origin callers that CORS_ORIGINS does not trust (helps diagnose login failures)."""
+    origin = (request.headers.get("origin") or "").rstrip("/")
+    if origin and origin not in _origins and request.method == "OPTIONS":
+        logger.warning(f"CORS preflight rejected for untrusted origin: {origin} path={request.url.path}")
+    return await call_next(request)
+
+
 async def bootstrap_privileged(role: str, email_var: str, password_var: str, name: str):
     """Creates the first admin account only from explicit, strong env credentials."""
     from datetime import datetime, timezone, timedelta

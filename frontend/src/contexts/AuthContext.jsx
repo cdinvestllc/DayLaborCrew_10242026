@@ -5,17 +5,54 @@ const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const AuthContext = createContext(null);
 
 // Session lives in an HttpOnly cookie; JS only echoes the CSRF cookie back as a header.
+// When the app is opened from a domain alias (e.g. a named preview URL) the API host's cookie
+// isn't readable via document.cookie, so the token is fetched from /auth/csrf instead.
 axios.defaults.withCredentials = true;
 const readCookie = (name) =>
   document.cookie.split("; ").find(c => c.startsWith(`${name}=`))?.split("=")[1];
-axios.interceptors.request.use((config) => {
+const SAFE = ["GET", "HEAD", "OPTIONS"];
+const SESSION_CHANGING = /\/api\/auth\/(login|register|logout|logout-all|google\/callback|convert-to-contractor|reset-password)/;
+let csrfCache = null;
+let csrfPromise = null;
+const fetchCsrf = () => {
+  if (!csrfPromise) {
+    csrfPromise = axios.get(`${API}/auth/csrf`)
+      .then(r => { csrfCache = r.data?.csrf_token || null; return csrfCache; })
+      .catch(() => null)
+      .finally(() => { csrfPromise = null; });
+  }
+  return csrfPromise;
+};
+axios.interceptors.request.use(async (config) => {
   const method = (config.method || "get").toUpperCase();
-  if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
-    const csrf = readCookie("tdl_csrf");
-    if (csrf) config.headers["X-CSRF-Token"] = decodeURIComponent(csrf);
+  if (!SAFE.includes(method)) {
+    const cookie = readCookie("tdl_csrf");
+    let csrf = cookie ? decodeURIComponent(cookie) : csrfCache;
+    if (!csrf && !SESSION_CHANGING.test(config.url || "")) csrf = await fetchCsrf();
+    if (csrf) config.headers["X-CSRF-Token"] = csrf;
   }
   return config;
 });
+axios.interceptors.response.use(
+  (res) => {
+    if (SESSION_CHANGING.test(res.config?.url || "")) csrfCache = null;
+    return res;
+  },
+  async (error) => {
+    const cfg = error.config;
+    if (cfg && !cfg._csrfRetry && error.response?.status === 403 &&
+        error.response?.data?.detail === "CSRF validation failed") {
+      cfg._csrfRetry = true;
+      csrfCache = null;
+      const csrf = await fetchCsrf();
+      if (csrf) {
+        cfg.headers["X-CSRF-Token"] = csrf;
+        return axios(cfg);
+      }
+    }
+    return Promise.reject(error);
+  }
+);
 localStorage.removeItem("tdl_token");
 
 export function AuthProvider({ children }) {

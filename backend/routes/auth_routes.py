@@ -169,6 +169,14 @@ async def login(data: UserLogin, request: Request, response: Response):
     return session_body(token, user)
 
 
+@router.get("/csrf")
+async def get_csrf(request: Request):
+    """Returns the caller's CSRF cookie value for frontends served from another (trusted) origin,
+    where document.cookie can't read the API host's cookie. CORS keeps untrusted origins from reading it."""
+    from auth import CSRF_COOKIE
+    return {"csrf_token": request.cookies.get(CSRF_COOKIE)}
+
+
 @router.post("/logout")
 async def logout(request: Request, response: Response, credentials=Depends(bearer_scheme)):
     token, _ = extract_token(request, credentials)
