@@ -1,0 +1,35 @@
+{
+  "summary": "Tested the CSRF image-upload fix, instant job list update, the Emergency Job Start fee (full Stripe test payment), admin fee setting, demo jobs and dark mode contrast. Almost everything works. One security bug: crew can list unpaid (pending_payment) emergency jobs by calling GET /api/jobs/?status=pending_payment. Backend: 30/31 pytest pass (the new suite plus the iteration 5 regression suite). Frontend: every flow in the request passed. The UI tests ran in the browser with the tdl_csrf cookie removed, to copy the embedded-preview case. In that state, the job image upload, crew profile photo upload and portfolio upload all returned 200 and showed no CSRF error. A regular job post appeared right away: My Jobs went from 3 to 4 with no reload. The Post Job modal showed 'Emergency · $2.99', the fee note and 'Pay $2.99 & Post'. Submitting created a pending_payment job and redirected to checkout.stripe.com for US$2.99. The test card 4242 payment returned to ?emergency_session=..., the polling-emergency-banner appeared, and the job became Open. The 'Awaiting Payment' badge and the pay-emergency/delete-pending buttons showed correctly. Admin Settings showed 2.99. Setting it to 4.50 changed the public fee to 4.5 and the contractor modal to $4.50. Entering 0.3 showed the error toast 'Emergency fee must be at least $0.50'. The fee is restored to 2.99. Contractors 1, 2 and 3 each have 3 seeded Atlanta-area demo jobs. The crew map centers on Atlanta with 10 pins, and testcrew2 sees 'Drywall Hanging - Basement Finish' as In Progress. Dark mode: View Page, the Offer chips, TEST20 and the Test Coupon button are rgb(143,168,255) and readable, and the coupon table is readable. Light mode looks normal (links rgb(0,0,255)). The availability toggle (200) and logout (200) work.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "GET /api/jobs/?status=pending_payment", "issue": "Crew can see other contractors' unpaid emergency jobs. list_jobs copies the crew-supplied status into the Mongo query (query['status']=status) with no allow-list. Also exposes cancelled, in_progress and other jobs belonging to anyone. Reproduced in test_emergency_job_flow.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "POST /api/jobs/ (is_emergency=true)", "issue": "consume_job_post_credit runs before payment. An emergency job that is abandoned or deleted unpaid still uses up one of the plan's job posts, because the credit is not refunded on delete. Unpaid pending jobs are also never cleaned up or expired."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Post Job modal", "issues": ["Start/End Date/Time fields use the browser's native datetime-local picker instead of the shadcn calendar (minor)"]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_iteration6_csrf_emergency.py", "/app/backend/tests/test_demo_login_cors.py", "/app/test_reports/pytest/pytest_iter6.xml"],
+  "action_items": [
+    "In routes/job_routes.py list_jobs, allow-list the status values crew can request, e.g. only open or fulfilled. Never let crew query pending_payment.",
+    "Optional: refund the job post credit when an unpaid emergency job is deleted (or only consume the credit after payment), and expire stale pending_payment jobs."
+  ],
+  "critical_code_review_comments": [
+    "The session-bound HMAC CSRF token in auth.py is sound: a token from another user's session is rejected (tested), and a missing or wrong header returns 403.",
+    "Two admin endpoints set the emergency fee (PUT /admin/settings and PUT /admin/settings/emergency-price). Both validate >= 0.5. Consider removing the duplicate.",
+    "AdminDashboard.jsx (>2000 lines) and ContractorDashboard.jsx (~690 lines) should be split up."
+  ],
+  "updated_files": ["/app/backend/tests/test_iteration6_csrf_emergency.py"],
+  "success_rate": {"backend": "97% (30/31)", "frontend": "100%"},
+  "seed_data_creation": "None kept. Test jobs (TEST_iter6*) deleted. Emergency fee restored to 2.99. testcrew profile_photo reset to null and the test portfolio image removed. testcrew2 availability toggled and restored to Available. Side effects: contractor1 and contractor2 job_posts_used went up (contractor1 is at 4/10 for the period), and 3 test emergency_job payment_transactions remain (1 paid with a Stripe test card).",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run: REACT_APP_BACKEND_URL=https://crew-workforce.preview.emergentagent.com pytest backend/tests/test_iteration6_csrf_emergency.py. test_emergency_job_flow fails until the crew ?status leak is fixed. To copy the embedded-preview CSRF case in Playwright, remove the tdl_csrf cookie after login (clear_cookies, then add_cookies without it) and reload. Stripe checkout fields: #email, #cardNumber, #cardExpiry, #cardCvc, #billingName, #billingPostalCode. Job description must be at least 10 characters. Use contractor2 or contractor3 for posting tests to save contractor1's quota.",
+  "rca of the issue": "Crew status leak: in list_jobs, the crew branch runs `if status: query['status'] = status`, so the caller fully controls the status filter. Fix: `allowed={'open','fulfilled'}; query['status'] = status if status in allowed else {'$in': list(allowed)}`."
+}

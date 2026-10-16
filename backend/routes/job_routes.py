@@ -108,11 +108,9 @@ async def list_jobs(
         # Contractors only see their own jobs
         query["contractor_id"] = current_user["id"]
     else:
-        # Crew sees all open/fulfilled jobs
-        if status:
-            query["status"] = status
-        else:
-            query["status"] = {"$in": ["open", "fulfilled"]}
+        # Crew only ever sees live jobs (never unpaid, cancelled or other contractors' private states)
+        crew_visible = ["open", "fulfilled"]
+        query["status"] = status if status in crew_visible else {"$in": crew_visible}
 
     if trade:
         query["trade"] = trade
@@ -189,6 +187,10 @@ async def delete_job(job_id: str, current_user: dict = Depends(get_current_user)
     if job.get("crew_accepted") and current_user["role"] not in ("admin", "super_admin"):
         raise HTTPException(status_code=400, detail="Jobs with accepted crew must be cancelled, not deleted")
     await db.jobs.delete_one({"id": job_id})
+    if job.get("status") == "pending_payment" and job["contractor_id"] == current_user["id"]:
+        # Unpaid emergency job never went live: give the job post back
+        from routes.payment_routes import refund_job_post_credit
+        await refund_job_post_credit(current_user)
     return {"message": "Job deleted"}
 
 

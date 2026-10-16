@@ -126,3 +126,9 @@ frontend:
         -working: "NA"
         -agent: "main"
         -comment: "Interceptor falls back to GET /api/auth/csrf when tdl_csrf cookie unreadable; retries once on 'CSRF validation failed'."
+
+## Iteration 6 (main agent)
+user_problem_statement_update: "Instant job list update after posting; dark-mode contrast for links/buttons; sample demo jobs; fix 'CSRF validation failed' when adding images; one-time Emergency Job Start fee $2.99 (admin-editable)."
+agent_communication:
+    -agent: "main"
+    -message: "CSRF root cause: platform ingress rewrites tdl_session cookie to SameSite=None; Partitioned but tdl_csrf stays SameSite=Lax, so in embedded/cross-site preview the browser keeps session but drops csrf cookie (logs: header=False cookie=False). Fix: CSRF token is now HMAC(secret, session jti) — returned in login/register body (csrf_token) and GET /api/auth/csrf; server accepts header == csrf cookie OR session-bound token. Emergency: POST /api/jobs/ with is_emergency=true -> status pending_payment (hidden from crew) + requires_payment/emergency_fee; POST /api/payments/emergency/stripe/{job_id} -> Stripe URL; GET /api/payments/emergency/status/{session_id} publishes on paid; GET /api/payments/emergency/fee public; admin Settings 'Emergency Job Start Fee' (min 0.50). Demo jobs: 9 is_demo jobs seeded (Atlanta/Decatur/Marietta). SW v3 network-first; /api responses no-store."
