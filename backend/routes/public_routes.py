@@ -1,6 +1,7 @@
 """Public routes — no authentication required."""
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from database import db
+from utils.storage import load_image, APP_NAME
 
 router = APIRouter()
 
@@ -57,3 +58,15 @@ async def get_verified_page_settings():
         "verified_page_header": (settings or {}).get("verified_page_header", "FIND VERIFIED CONTRACTORS"),
         "verified_page_tagline": (settings or {}).get("verified_page_tagline", "For property owners, apartments and home owners.")
     }
+
+
+@router.get("/files/{path:path}")
+async def get_public_file(path: str):
+    """Serves uploaded images (profile photos, logos, portfolio) for public profiles."""
+    if not path.startswith(f"{APP_NAME}/") or ".." in path:
+        raise HTTPException(status_code=404, detail="File not found")
+    data, content_type = await load_image(path)
+    return Response(content=data, media_type=content_type, headers={
+        "Cache-Control": "public, max-age=86400",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+    })

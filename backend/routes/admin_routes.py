@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from database import db
-from auth import get_current_user
+from auth import get_current_user, bump_token_version, log_security_event
+from utils.storage import save_image
 from models import (
     AdminUserUpdate, TermsUpdate, SettingsUpdate, CMSUpdate,
     TradeCreate, TradeUpdate, BulkEmailRequest, ActivityLogEntry,
@@ -19,6 +20,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 ADMIN_ROLES = {"admin", "super_admin"}
+ASSIGNABLE_ROLES = {"crew", "contractor", "advertiser", "admin"}
 
 
 # ─── Permission Helpers ───────────────────────────────────────────────────────
@@ -178,11 +180,21 @@ async def update_user(user_id: str, data: AdminUserUpdate, request: Request, adm
     if not update:
         raise HTTPException(status_code=400, detail="No fields to update")
 
-    # Prevent role escalation
-    if "role" in update and update["role"] == "super_admin":
-        raise HTTPException(status_code=403, detail="Cannot assign super_admin role")
+    if "role" in update:
+        new_role = update["role"]
+        if new_role not in ASSIGNABLE_ROLES:
+            log_security_event("role_escalation_blocked", request, actor=admin["id"], target=user_id, role=new_role)
+            raise HTTPException(status_code=403, detail="Cannot assign this role")
+        if new_role == "admin" and admin["role"] != "super_admin":
+            log_security_event("role_escalation_blocked", request, actor=admin["id"], target=user_id, role=new_role)
+            raise HTTPException(status_code=403, detail="Only Super Admin can grant admin access")
+        if user_id == admin["id"]:
+            raise HTTPException(status_code=403, detail="You cannot change your own role")
 
     await db.users.update_one({"id": user_id}, {"$set": update})
+    if update.get("role", target["role"]) != target["role"] or update.get("is_active") is False:
+        await bump_token_version(user_id)
+        log_security_event("user_privileges_changed", request, actor=admin["id"], target=user_id)
     await log_activity(request, admin, "update_user", "user", user_id, str(update))
     return {"message": "User updated"}
 
@@ -208,12 +220,18 @@ async def suspend_user(user_id: str, request: Request, admin: dict = Depends(req
     if is_protected(target, admin):
         raise HTTPException(status_code=403, detail="Cannot suspend this user")
     await db.users.update_one({"id": user_id}, {"$set": {"is_active": False}})
+    await bump_token_version(user_id)
     await log_activity(request, admin, "suspend_user", "user", user_id, f"Suspended: {target.get('email')}")
     return {"message": "User suspended"}
 
 
 @router.post("/users/{user_id}/activate")
 async def activate_user(user_id: str, request: Request, admin: dict = Depends(require_admin)):
+    target = await db.users.find_one({"id": user_id}, {"_id": 0, "role": 1})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if is_protected(target, admin):
+        raise HTTPException(status_code=403, detail="Cannot modify this user")
     await db.users.update_one({"id": user_id}, {"$set": {"is_active": True}})
     await log_activity(request, admin, "activate_user", "user", user_id)
     return {"message": "User activated"}
@@ -221,6 +239,13 @@ async def activate_user(user_id: str, request: Request, admin: dict = Depends(re
 
 @router.put("/users/{user_id}/points")
 async def update_user_points(user_id: str, points: int, request: Request, admin: dict = Depends(require_admin)):
+    target = await db.users.find_one({"id": user_id}, {"_id": 0, "role": 1})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if is_protected(target, admin):
+        raise HTTPException(status_code=403, detail="Cannot modify this user")
+    if points < 0:
+        raise HTTPException(status_code=400, detail="Points cannot be negative")
     await db.users.update_one({"id": user_id}, {"$set": {"points": points}})
     await log_activity(request, admin, "update_points", "user", user_id, f"Points set to {points}")
     return {"message": f"Points set to {points}"}
@@ -230,7 +255,7 @@ async def update_user_points(user_id: str, points: int, request: Request, admin:
 async def suspend_all_users(request: Request, admin: dict = Depends(require_super_admin)):
     result = await db.users.update_many(
         {"role": {"$in": ["crew", "contractor"]}},
-        {"$set": {"is_active": False}}
+        {"$set": {"is_active": False}, "$inc": {"token_version": 1}}
     )
     await log_activity(request, admin, "suspend_all_users", details=f"Suspended {result.modified_count} users")
     return {"message": f"Suspended {result.modified_count} users"}
@@ -429,22 +454,13 @@ async def upload_logo(
     logo_type: str = Query("logo"),  # logo or favicon
     admin: dict = Depends(require_admin)
 ):
-    from fastapi import UploadFile, File
-    import shutil
-    from pathlib import Path
+    if logo_type not in ("logo", "favicon"):
+        raise HTTPException(status_code=400, detail="logo_type must be logo or favicon")
     form = await request.form()
     file = form.get("file")
-    if not file:
+    if not file or not hasattr(file, "read"):
         raise HTTPException(status_code=400, detail="No file provided")
-    ext = file.filename.split(".")[-1] if "." in file.filename else "png"
-    filename = f"{logo_type}.{ext}"
-    save_dir = Path("/app/backend/uploads/cms")
-    save_dir.mkdir(parents=True, exist_ok=True)
-    path = save_dir / filename
-    with open(path, "wb") as f:
-        import shutil as sh
-        sh.copyfileobj(file.file, f)
-    url = f"/uploads/cms/{filename}"
+    url = await save_image(file, "site", "cms")
     field = "site_logo" if logo_type == "logo" else "site_favicon"
     await db.settings.update_one({}, {"$set": {field: url}}, upsert=True)
     await log_activity(request, admin, f"upload_{logo_type}", details=url)
@@ -580,7 +596,8 @@ async def export_users_json(admin: dict = Depends(require_super_admin)):
 
 @router.post("/import/users/csv")
 async def import_users_csv(request: Request, admin: dict = Depends(require_super_admin)):
-    from auth import hash_password
+    import secrets
+    from auth import hash_password, validate_password_strength
     form = await request.form()
     file = form.get("file")
     if not file:
@@ -601,12 +618,19 @@ async def import_users_csv(request: Request, admin: dict = Depends(require_super
             existing = await db.users.find_one({"email": email})
             if existing:
                 continue
+            role = (row.get("role") or "crew").strip()
+            if role not in ("crew", "contractor"):
+                errors.append(f"{email}: role must be crew or contractor")
+                continue
+            password = row.get("password") or ""
+            if validate_password_strength(password):
+                password = secrets.token_urlsafe(24)  # unusable until the user resets it
             code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
             user_doc = {
                 "id": str(uuid.uuid4()),
                 "email": email,
-                "password_hash": hash_password(row.get("password", "TempPass@123")),
-                "role": row.get("role", "crew"),
+                "password_hash": hash_password(password),
+                "role": role,
                 "name": row.get("name", email),
                 "phone": row.get("phone", None),
                 "is_active": True, "is_verified": False,
@@ -901,8 +925,9 @@ async def admin_reset_password(user_id: str, request: Request, admin: dict = Dep
 
     import secrets
     from auth import hash_password
-    temp_password = "Temp@" + secrets.token_hex(4).upper()
+    temp_password = "Tmp@" + secrets.token_urlsafe(12) + "a1"
     await db.users.update_one({"id": user_id}, {"$set": {"password_hash": hash_password(temp_password)}})
+    await bump_token_version(user_id)
 
     await log_activity(request, admin, "reset_password", target_type="user", target_id=user_id, details=f"Password reset for {target['name']}")
     return {"message": "Password reset successfully", "temp_password": temp_password}

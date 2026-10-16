@@ -1082,9 +1082,8 @@ function ExportTab() {
 
   const exportFile = (type) => {
     const url = `${API}/admin/export/users/${type}`;
-    const token = localStorage.getItem("tdl_token");
-    fetch(url, { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => r.blob())
+    fetch(url, { credentials: "include" })
+      .then(r => { if (!r.ok) throw new Error("export failed"); return r.blob(); })
       .then(blob => {
         const u = URL.createObjectURL(blob);
         const a = document.createElement("a");

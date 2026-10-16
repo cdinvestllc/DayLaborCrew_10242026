@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Depends, Request
 from database import db
-from auth import get_current_user, hash_password, create_token, user_to_response
+from auth import get_current_user, hash_password, create_token, user_to_response, validate_password_strength, limiter
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 import random, string, logging
@@ -49,7 +49,11 @@ async def get_active_ads():
 # ─── Advertiser: Signup ───────────────────────────────────────────────────────
 
 @router.post("/signup", status_code=201)
-async def advertiser_signup(data: AdvertiserSignup):
+@limiter.limit("5/minute")
+async def advertiser_signup(data: AdvertiserSignup, request: Request):
+    pw_error = validate_password_strength(data.password)
+    if pw_error:
+        raise HTTPException(status_code=400, detail=pw_error)
     existing = await db.users.find_one({"email": data.email.lower()})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")

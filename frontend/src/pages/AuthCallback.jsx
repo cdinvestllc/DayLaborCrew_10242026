@@ -28,9 +28,8 @@ export default function AuthCallback() {
     const exchange = async () => {
       try {
         const res = await axios.post(`${API}/auth/google/callback`, { session_id: sessionId });
-        const { access_token, user: userData } = res.data;
-        localStorage.setItem("tdl_token", access_token);
-        axios.defaults.headers.common["Authorization"] = `Bearer ${access_token}`;
+        const { user: userData } = res.data;
+        window.history.replaceState(null, "", window.location.pathname);
         updateUser(userData);
 
         // Route based on role
@@ -39,8 +38,8 @@ export default function AuthCallback() {
         else if (["admin", "super_admin"].includes(userData.role)) navigate("/admin/dashboard", { replace: true });
         else navigate("/auth", { replace: true });
       } catch (err) {
-        console.error("OAuth callback error:", err);
-        navigate("/auth?error=oauth_failed", { replace: true });
+        const reason = err?.response?.status === 403 ? "oauth_forbidden" : "oauth_failed";
+        navigate(`/auth?error=${reason}`, { replace: true });
       }
     };
 

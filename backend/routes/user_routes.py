@@ -1,10 +1,9 @@
 import os
 import uuid
-import shutil
-from pathlib import Path
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Query, Request
 from database import db
-from auth import get_current_user, user_to_response
+from auth import get_current_user, get_optional_user, user_to_response
+from utils.storage import save_image
 from models import ProfileUpdate, LocationUpdate
 from typing import Optional
 from datetime import datetime, timezone
@@ -13,11 +12,6 @@ import logging
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-UPLOAD_DIR = Path("/app/backend/uploads")
-PROFILE_DIR = UPLOAD_DIR / "profile_photos"
-LOGO_DIR = UPLOAD_DIR / "logos"
-PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-LOGO_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @router.get("/me")
@@ -60,27 +54,8 @@ async def update_location(data: LocationUpdate, current_user: dict = Depends(get
 
 @router.post("/upload-photo")
 async def upload_photo(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="File must be an image")
-    ext = file.filename.split(".")[-1] if "." in file.filename else "jpg"
-    filename = f"{current_user['id']}.{ext}"
-
-    if current_user["role"] == "contractor":
-        path = LOGO_DIR / filename
-        field = "logo"
-    else:
-        path = PROFILE_DIR / filename
-        field = "profile_photo"
-
-    with open(path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-
-    photo_url = f"/uploads/{field.replace('_', '_photos/' if field == 'profile_photo' else 's/')}{filename}"
-    if current_user["role"] == "contractor":
-        photo_url = f"/uploads/logos/{filename}"
-    else:
-        photo_url = f"/uploads/profile_photos/{filename}"
-
+    field = "logo" if current_user["role"] == "contractor" else "profile_photo"
+    photo_url = await save_image(file, current_user["id"], "logos" if field == "logo" else "profile_photos")
     await db.users.update_one({"id": current_user["id"]}, {"$set": {field: photo_url}})
     return {"url": photo_url}
 
@@ -93,20 +68,7 @@ async def upload_portfolio(files: list[UploadFile] = File(...), current_user: di
     if len(existing) + len(files) > 8:
         raise HTTPException(status_code=400, detail="Maximum 8 portfolio images allowed")
 
-    portfolio_dir = PROFILE_DIR.parent / "portfolio"
-    portfolio_dir.mkdir(parents=True, exist_ok=True)
-
-    urls = []
-    for file in files:
-        if not file.content_type.startswith("image/"):
-            continue
-        ext = file.filename.split(".")[-1] if "." in file.filename else "jpg"
-        filename = f"{current_user['id']}_{uuid.uuid4().hex[:8]}.{ext}"
-        path = portfolio_dir / filename
-        with open(path, "wb") as f:
-            shutil.copyfileobj(file.file, f)
-        urls.append(f"/uploads/portfolio/{filename}")
-
+    urls = [await save_image(file, current_user["id"], "portfolio") for file in files]
     updated = existing + urls
     await db.users.update_one({"id": current_user["id"]}, {"$set": {"portfolio": updated}})
     return {"urls": urls, "portfolio": updated}
@@ -208,13 +170,15 @@ async def redeem_points(points: int, current_user: dict = Depends(get_current_us
         base = datetime.now(timezone.utc)
 
     new_end = (base + timedelta(days=days)).isoformat()
-    await db.users.update_one(
-        {"id": current_user["id"]},
+    result = await db.users.update_one(
+        {"id": current_user["id"], "points": {"$gte": points}},
         {
             "$inc": {"points": -points},
             "$set": {"subscription_end": new_end, "subscription_status": "active"}
         }
     )
+    if result.modified_count == 0:
+        raise HTTPException(status_code=400, detail="Insufficient points")
     return {"message": f"Redeemed {points} points for {days} days", "new_subscription_end": new_end}
 
 
@@ -271,7 +235,7 @@ async def get_my_messages(current_user: dict = Depends(get_current_user)):
 async def get_message_thread(thread_id: str, current_user: dict = Depends(get_current_user)):
     """Get a specific message thread."""
     msg = await db.messages.find_one({"thread_id": thread_id}, {"_id": 0})
-    if not msg:
+    if not msg or current_user["id"] not in (msg.get("sender_id"), msg.get("recipient_id")):
         raise HTTPException(status_code=404, detail="Thread not found")
     # Mark as read
     if msg.get("recipient_id") == current_user["id"] and not msg.get("read"):
@@ -361,14 +325,14 @@ async def delete_all_notifications(current_user: dict = Depends(get_current_user
 # ─── Public Profile ───────────────────────────────────────────────────────────
 
 @router.get("/public/{user_id}")
-async def get_public_profile(user_id: str, viewer_id: Optional[str] = None):
+async def get_public_profile(user_id: str, viewer: Optional[dict] = Depends(get_optional_user)):
     """Public profile view. Privacy controls applied."""
     user = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
     if not user or not user.get("is_active"):
         raise HTTPException(status_code=404, detail="Profile not found")
 
     privacy = user.get("privacy", {})
-    is_own = viewer_id == user_id
+    is_own = bool(viewer) and viewer["id"] == user_id
 
     profile = {
         "id": user["id"],

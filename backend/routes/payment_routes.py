@@ -33,6 +33,32 @@ PLANS = {
 DEFAULT_VERIFIED_FEE = 39.99
 
 
+async def get_paypal_token() -> str:
+    if not PAYPAL_CLIENT_ID or not PAYPAL_SECRET:
+        raise HTTPException(status_code=503, detail="PayPal is not configured")
+    creds = base64.b64encode(f"{PAYPAL_CLIENT_ID}:{PAYPAL_SECRET}".encode()).decode()
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                f"{PAYPAL_BASE_URL}/v1/oauth2/token",
+                headers={"Authorization": f"Basic {creds}", "Content-Type": "application/x-www-form-urlencoded"},
+                data={"grant_type": "client_credentials"},
+            )
+            resp.raise_for_status()
+    except httpx.HTTPError:
+        logger.error("PayPal token request failed")
+        raise HTTPException(status_code=502, detail="PayPal is temporarily unavailable")
+    return resp.json()["access_token"]
+
+
+async def get_owned_tx(session_id: str, user: dict) -> dict | None:
+    """Payment transactions may only be read/finalised by the user who created them."""
+    tx = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
+    if tx and tx.get("user_id") != user["id"] and user.get("role") not in ("admin", "super_admin"):
+        raise HTTPException(status_code=404, detail="Payment not found")
+    return tx
+
+
 def now_str():
     return datetime.now(timezone.utc).isoformat()
 
@@ -186,11 +212,13 @@ async def stripe_payment_status(session_id: str, request: Request, current_user:
     stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=f"{str(request.base_url)}api/payments/stripe/webhook")
 
     # Check if already processed
-    tx = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
+    tx = await get_owned_tx(session_id, current_user)
     if tx and tx.get("payment_status") == "paid":
         return {"status": "complete", "payment_status": "paid", "already_processed": True}
 
     status = await stripe.get_checkout_status(session_id)
+    if status.metadata.get("user_id") not in (None, current_user["id"]) and current_user.get("role") not in ("admin", "super_admin"):
+        raise HTTPException(status_code=404, detail="Payment not found")
 
     if status.payment_status == "paid" and (not tx or tx.get("payment_status") != "paid"):
         plan = status.metadata.get("plan", "monthly")
@@ -283,9 +311,11 @@ async def paypal_create_order(data: CheckoutRequest, current_user: dict = Depend
 
 @router.post("/paypal/capture/{order_id}")
 async def paypal_capture(order_id: str, plan: str, current_user: dict = Depends(get_current_user)):
-    # Check already processed
-    tx = await db.payment_transactions.find_one({"session_id": order_id}, {"_id": 0})
-    if tx and tx.get("payment_status") == "paid":
+    tx = await get_owned_tx(order_id, current_user)
+    if not tx or tx.get("user_id") != current_user["id"]:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    plan = tx.get("plan", plan)
+    if tx.get("payment_status") == "paid":
         return {"status": "COMPLETED", "already_processed": True}
 
     access_token = await get_paypal_token()
@@ -397,11 +427,13 @@ async def boost_job_stripe(job_id: str, request: Request, current_user: dict = D
 @router.get("/boost/stripe/status/{session_id}")
 async def boost_stripe_status(session_id: str, request: Request, current_user: dict = Depends(get_current_user)):
     stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=f"{str(request.base_url)}api/payments/stripe/webhook")
-    tx = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
+    tx = await get_owned_tx(session_id, current_user)
     if tx and tx.get("payment_status") == "paid":
         return {"status": "complete", "already_processed": True}
 
     status = await stripe.get_checkout_status(session_id)
+    if status.metadata.get("user_id") not in (None, current_user["id"]) and current_user.get("role") not in ("admin", "super_admin"):
+        raise HTTPException(status_code=404, detail="Payment not found")
     if status.payment_status == "paid":
         job_id = status.metadata.get("job_id") or (tx.get("job_id") if tx else None)
         if job_id:
@@ -462,8 +494,11 @@ async def boost_job_paypal(job_id: str, request: Request, current_user: dict = D
 
 @router.post("/boost/paypal/capture/{order_id}")
 async def boost_paypal_capture(order_id: str, job_id: str, current_user: dict = Depends(get_current_user)):
-    tx = await db.payment_transactions.find_one({"session_id": order_id}, {"_id": 0})
-    if tx and tx.get("payment_status") == "paid":
+    tx = await get_owned_tx(order_id, current_user)
+    if not tx or tx.get("user_id") != current_user["id"]:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    job_id = tx.get("job_id") or job_id
+    if tx.get("payment_status") == "paid":
         return {"status": "COMPLETED", "already_processed": True}
 
     access_token = await get_paypal_token()
@@ -540,11 +575,13 @@ async def verified_contractor_status(session_id: str, request: Request, current_
     stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=f"{str(request.base_url)}api/payments/stripe/webhook")
 
     # Idempotency check
-    tx = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
+    tx = await get_owned_tx(session_id, current_user)
     if tx and tx.get("payment_status") == "paid":
         return {"status": "complete", "payment_status": "paid", "already_processed": True}
 
     status = await stripe.get_checkout_status(session_id)
+    if status.metadata.get("user_id") not in (None, current_user["id"]) and current_user.get("role") not in ("admin", "super_admin"):
+        raise HTTPException(status_code=404, detail="Payment not found")
 
     if status.payment_status == "paid":
         user_id = status.metadata.get("user_id", current_user["id"])

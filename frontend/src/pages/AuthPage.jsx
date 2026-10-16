@@ -8,6 +8,13 @@ import { Eye, EyeOff, Briefcase, Users, ArrowLeft, CheckCircle } from "lucide-re
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const HERO_BG = "https://images.unsplash.com/photo-1693478501743-799eefbc0ecd?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA4Mzl8MHwxfHNlYXJjaHwxfHxjb25zdHJ1Y3Rpb24lMjBzaXRlJTIwdGVhbSUyMHdvcmtpbmd8ZW58MHx8fHwxNzczMzk4OTM5fDA&ixlib=rb-4.1.0&q=85";
 
+const passwordError = (pw) => {
+  if (pw.length < 8 || pw.length > 72) return "Password must be 8-72 characters long";
+  if (!/[a-z]/.test(pw) || !/[A-Z]/.test(pw) || !/\d/.test(pw) || !/[^A-Za-z0-9]/.test(pw))
+    return "Password must include upper and lower case letters, a number and a symbol";
+  return null;
+};
+
 export default function AuthPage() {
   const [params] = useSearchParams();
   const navigate = useNavigate();
@@ -38,6 +45,9 @@ export default function AuthPage() {
 
   // Check for reset token in URL
   useEffect(() => {
+    const oauthError = params.get("error");
+    if (oauthError === "oauth_forbidden") toast.error("This account can't use Google sign-in. Use email and password.");
+    else if (oauthError === "oauth_failed") toast.error("Google sign-in failed. Please try again.");
     const token = params.get("token");
     if (token && params.get("mode") === "reset") {
       setResetToken(token);
@@ -74,7 +84,8 @@ export default function AuthPage() {
 
   const handleResetPassword = async (e) => {
     e.preventDefault();
-    if (newPassword.length < 6) return toast.error("Password must be at least 6 characters");
+    const pwError = passwordError(newPassword);
+    if (pwError) return toast.error(pwError);
     setLoading(true);
     try {
       await axios.post(`${API}/auth/reset-password`, { token: resetToken, new_password: newPassword });
@@ -103,7 +114,8 @@ export default function AuthPage() {
         else navigate("/admin/dashboard");
       } else {
         if (!form.name.trim()) { toast.error("Name is required"); return; }
-        if (form.password.length < 6) { toast.error("Password must be at least 6 characters"); return; }
+        const pwError = passwordError(form.password);
+        if (pwError) { toast.error(pwError); return; }
         const payload = { ...form, role, agreed_to_terms: agreedToTerms };
         if (role !== "contractor") delete payload.company_name;
         if (role !== "crew") delete payload.trade;

@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from "react";
+import axios from "axios";
 import { useAuth } from "./AuthContext";
 
 const WS_URL = process.env.REACT_APP_BACKEND_URL
@@ -8,17 +9,27 @@ const WS_URL = process.env.REACT_APP_BACKEND_URL
 const WebSocketContext = createContext(null);
 
 export function WebSocketProvider({ children }) {
-  const { token, user } = useAuth();
+  const { user } = useAuth();
+  const userId = user?.id;
   const ws = useRef(null);
   const [connected, setConnected] = useState(false);
   const [lastMessage, setLastMessage] = useState(null);
   const listeners = useRef([]);
   const reconnectTimer = useRef(null);
 
-  const connect = useCallback(() => {
-    if (!token || ws.current?.readyState === WebSocket.OPEN) return;
+  const active = useRef(false);
 
-    ws.current = new WebSocket(`${WS_URL}/api/ws/${token}`);
+  const connect = useCallback(async () => {
+    if (!userId || ws.current?.readyState === WebSocket.OPEN) return;
+    let ticket;
+    try {
+      ticket = (await axios.post(`${process.env.REACT_APP_BACKEND_URL}/api/ws/ticket`)).data.ticket;
+    } catch {
+      if (active.current) reconnectTimer.current = setTimeout(connect, 10000);
+      return;
+    }
+    if (!active.current) return;
+    ws.current = new WebSocket(`${WS_URL}/api/ws?ticket=${encodeURIComponent(ticket)}`);
 
     ws.current.onopen = () => {
       setConnected(true);
@@ -33,26 +44,25 @@ export function WebSocketProvider({ children }) {
       } catch { }
     };
 
-    ws.current.onclose = () => {
+    ws.current.onclose = (evt) => {
       setConnected(false);
-      // Reconnect after 3 seconds
-      reconnectTimer.current = setTimeout(connect, 3000);
+      if (active.current && evt.code !== 4003) reconnectTimer.current = setTimeout(connect, 3000);
     };
 
     ws.current.onerror = () => {
       ws.current?.close();
     };
-  }, [token]);
+  }, [userId]);
 
   useEffect(() => {
-    if (token) {
-      connect();
-    }
+    active.current = !!userId;
+    if (userId) connect();
     return () => {
+      active.current = false;
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       ws.current?.close();
     };
-  }, [token, connect]);
+  }, [userId, connect]);
 
   const sendMessage = useCallback((data) => {
     if (ws.current?.readyState === WebSocket.OPEN) {

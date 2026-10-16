@@ -2,18 +2,31 @@ import uuid
 import random
 import string
 import secrets
+import time
 import httpx
 from datetime import datetime, timezone, timedelta
-from fastapi import APIRouter, HTTPException, status, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response, Depends
 from database import db
 from models import UserCreate, UserLogin, ForgotPasswordRequest, ResetPasswordRequest
-from auth import hash_password, verify_password, create_token, user_to_response
+from auth import (
+    hash_password, verify_password, user_to_response, issue_session, clear_session,
+    validate_password_strength, hash_secret, decode_token, revoke_token, bump_token_version,
+    extract_token, bearer_scheme, get_current_user, limiter, log_security_event,
+)
 from utils.email_utils import send_welcome_email, send_password_reset_email
 import os
 import logging
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+PUBLIC_ROLES = ("crew", "contractor")
+PRIVILEGED_ROLES = ("admin", "super_admin")
+MAX_FAILED_LOGINS = 10
+FAILED_WINDOW_SECONDS = 15 * 60
+LOCKOUT_SECONDS = 15 * 60
+RESET_TOKEN_TTL = timedelta(hours=1)
+OAUTH_SESSION_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
 
 
 def generate_referral_code(length: int = 8) -> str:
@@ -24,18 +37,53 @@ def trial_end(days: int = 30) -> str:
     return (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
 
 
-@router.post("/register", status_code=201)
-async def register(data: UserCreate):
-    existing = await db.users.find_one({"email": data.email.lower()})
-    if existing:
-        raise HTTPException(status_code=400, detail="Email already registered")
+def session_body(token: str, user: dict) -> dict:
+    return {"access_token": token, "token_type": "bearer", "user": user_to_response(user)}
 
-    if data.role not in ("crew", "contractor"):
-        raise HTTPException(status_code=400, detail="Role must be crew or contractor")
 
+async def unique_referral_code() -> str:
     code = generate_referral_code()
     while await db.users.find_one({"referral_code": code}):
         code = generate_referral_code()
+    return code
+
+
+# ─── Login lockout (per account, independent of IP) ─────────────────────────
+
+async def ensure_not_locked(email: str, request: Request):
+    doc = await db.login_attempts.find_one({"email": email})
+    if doc and doc.get("locked_until", 0) > time.time():
+        log_security_event("login_locked", request, email=email)
+        raise HTTPException(status_code=429, detail="Too many failed attempts. Try again later.")
+
+
+async def record_failed_login(email: str):
+    now = time.time()
+    doc = await db.login_attempts.find_one({"email": email})
+    if not doc or doc.get("first_at", 0) < now - FAILED_WINDOW_SECONDS:
+        await db.login_attempts.update_one(
+            {"email": email}, {"$set": {"count": 1, "first_at": now, "locked_until": 0}}, upsert=True
+        )
+        return
+    count = doc.get("count", 0) + 1
+    update = {"count": count}
+    if count >= MAX_FAILED_LOGINS:
+        update["locked_until"] = now + LOCKOUT_SECONDS
+    await db.login_attempts.update_one({"email": email}, {"$set": update})
+
+
+@router.post("/register", status_code=201)
+@limiter.limit("5/minute")
+async def register(data: UserCreate, request: Request, response: Response):
+    if data.role not in PUBLIC_ROLES:
+        log_security_event("register_role_rejected", request, role=data.role)
+        raise HTTPException(status_code=400, detail="Role must be crew or contractor")
+    pw_error = validate_password_strength(data.password)
+    if pw_error:
+        raise HTTPException(status_code=400, detail=pw_error)
+    email = data.email.lower()
+    if await db.users.find_one({"email": email}):
+        raise HTTPException(status_code=400, detail="Email already registered")
 
     trial_days = int(os.environ.get("TRIAL_DAYS", 30))
     if data.role == "contractor":
@@ -44,7 +92,7 @@ async def register(data: UserCreate):
 
     user_doc = {
         "id": str(uuid.uuid4()),
-        "email": data.email.lower(),
+        "email": email,
         "password_hash": hash_password(data.password),
         "role": data.role,
         "name": data.name,
@@ -55,12 +103,12 @@ async def register(data: UserCreate):
         "created_at": now,
         "trial_start_date": now,
         "trial_end_date": trial_end(trial_days),
-        "trial_type": data.role,  # "crew" or "contractor"
+        "trial_type": data.role,
         "subscription_status": "trial",
         "subscription_plan": None,
         "subscription_end": None,
         "points": 50,
-        "referral_code": code,
+        "referral_code": await unique_referral_code(),
         "referred_by": None,
         "bio": "",
         "trade": "",
@@ -77,6 +125,7 @@ async def register(data: UserCreate):
         "hide_location": False,
         "favorite_crew": [],
         "auth_provider": "email",
+        "token_version": 0,
     }
 
     if data.referral_code_used:
@@ -93,138 +142,167 @@ async def register(data: UserCreate):
             })
 
     await db.users.insert_one(user_doc)
-    token = create_token({"sub": user_doc["id"], "role": user_doc["role"]})
-    await send_welcome_email(data.name, data.email, data.role)
-
-    return {"access_token": token, "token_type": "bearer", "user": user_to_response(user_doc)}
+    log_security_event("register", request, user=user_doc["id"], role=user_doc["role"])
+    token = issue_session(response, user_doc)
+    await send_welcome_email(data.name, email, data.role)
+    return session_body(token, user_doc)
 
 
 @router.post("/login")
-async def login(data: UserLogin):
-    user = await db.users.find_one({"email": data.email.lower()}, {"_id": 0})
-    if not user or not verify_password(data.password, user.get("password_hash", "")):
+@limiter.limit("20/minute")
+async def login(data: UserLogin, request: Request, response: Response):
+    email = data.email.lower()
+    await ensure_not_locked(email, request)
+    user = await db.users.find_one({"email": email}, {"_id": 0})
+    if not user or not verify_password(data.password, user.get("password_hash")):
+        await record_failed_login(email)
+        log_security_event("login_failed", request, email=email)
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if not user.get("is_active", True):
+        log_security_event("login_suspended", request, user=user["id"])
         raise HTTPException(status_code=403, detail="Account suspended. Contact support.")
 
-    token = create_token({"sub": user["id"], "role": user["role"]})
-    return {"access_token": token, "token_type": "bearer", "user": user_to_response(user)}
+    await db.login_attempts.delete_one({"email": email})
+    log_security_event("login_success", request, user=user["id"], role=user["role"])
+    token = issue_session(response, user)
+    return session_body(token, user)
 
 
-# ─── Forgot Password ─────────────────────────────────────────────────────────
+@router.post("/logout")
+async def logout(request: Request, response: Response, credentials=Depends(bearer_scheme)):
+    token, _ = extract_token(request, credentials)
+    payload = decode_token(token) if token else None
+    if payload:
+        await revoke_token(payload)
+        log_security_event("logout", request, user=payload["sub"])
+    clear_session(response)
+    return {"message": "Logged out"}
+
+
+@router.post("/logout-all")
+async def logout_all(request: Request, response: Response, current_user: dict = Depends(get_current_user)):
+    await bump_token_version(current_user["id"])
+    log_security_event("logout_all", request, user=current_user["id"])
+    clear_session(response)
+    return {"message": "Signed out of all devices"}
+
+
+# ─── Forgot / Reset Password ─────────────────────────────────────────────────
+
+GENERIC_RESET_MSG = {"message": "If that email is registered, a reset link has been sent."}
+
 
 @router.post("/forgot-password")
-async def forgot_password(data: ForgotPasswordRequest):
-    # Case-insensitive email lookup
-    user = await db.users.find_one({"email": data.email.lower()}, {"_id": 0})
-    # Always return 200 to prevent email enumeration
-    if not user:
-        return {"message": "If that email is registered, a reset link has been sent."}
+@limiter.limit("5/15minutes")
+async def forgot_password(data: ForgotPasswordRequest, request: Request):
+    email = data.email.lower()
+    user = await db.users.find_one({"email": email}, {"_id": 0})
+    log_security_event("password_reset_requested", request, found=bool(user))
+    if not user or not user.get("is_active", True):
+        return GENERIC_RESET_MSG
 
-    # Generate secure reset token
-    token = secrets.token_urlsafe(32)
-    expires = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
-
-    await db.password_resets.update_one(
-        {"email": data.email.lower()},
-        {"$set": {"token": token, "expires_at": expires, "used": False}},
-        upsert=True
-    )
-
-    await send_password_reset_email(user["email"], user.get("name", "User"), token)
-
-    return {"message": "If that email is registered, a reset link has been sent."}
+    raw_token = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+    await db.password_resets.delete_many({"user_id": user["id"]})
+    await db.password_resets.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "token_hash": hash_secret(raw_token),
+        "expires_at": now + RESET_TOKEN_TTL,
+        "used": False,
+        "created_at": now,
+    })
+    await send_password_reset_email(user["email"], user.get("name", "User"), raw_token)
+    return GENERIC_RESET_MSG
 
 
 @router.post("/reset-password")
-async def reset_password(data: ResetPasswordRequest):
-    reset_doc = await db.password_resets.find_one({"token": data.token})
-    if not reset_doc:
-        raise HTTPException(status_code=400, detail="Invalid or expired reset link")
-    if reset_doc.get("used"):
-        raise HTTPException(status_code=400, detail="Reset link already used")
+@limiter.limit("10/15minutes")
+async def reset_password(data: ResetPasswordRequest, request: Request):
+    pw_error = validate_password_strength(data.new_password)
+    if pw_error:
+        raise HTTPException(status_code=400, detail=pw_error)
 
-    expires = reset_doc.get("expires_at", "")
-    try:
-        exp_dt = datetime.fromisoformat(expires)
-        if exp_dt.tzinfo is None:
-            exp_dt = exp_dt.replace(tzinfo=timezone.utc)
-        if exp_dt < datetime.now(timezone.utc):
-            raise HTTPException(status_code=400, detail="Reset link has expired")
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid reset link")
-
-    if len(data.new_password) < 6:
-        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
-
-    await db.users.update_one(
-        {"email": reset_doc["email"]},
-        {"$set": {"password_hash": hash_password(data.new_password)}}
+    now = datetime.now(timezone.utc)
+    reset_doc = await db.password_resets.find_one_and_update(
+        {"token_hash": hash_secret(data.token), "used": False, "expires_at": {"$gt": now}},
+        {"$set": {"used": True, "used_at": now}},
     )
-    await db.password_resets.update_one({"token": data.token}, {"$set": {"used": True}})
+    if not reset_doc:
+        log_security_event("password_reset_invalid", request)
+        raise HTTPException(status_code=400, detail="Invalid or expired reset link")
 
+    user = await db.users.find_one({"id": reset_doc["user_id"]}, {"_id": 0, "id": 1, "email": 1})
+    if not user:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset link")
+    await db.users.update_one({"id": user["id"]}, {"$set": {"password_hash": hash_password(data.new_password)}})
+    await bump_token_version(user["id"])
+    await db.login_attempts.delete_one({"email": user["email"]})
+    await db.password_resets.delete_many({"user_id": user["id"], "used": False})
+    log_security_event("password_reset_success", request, user=user["id"])
     return {"message": "Password reset successfully. You can now log in."}
 
 
 # ─── Google OAuth ─────────────────────────────────────────────────────────────
 
-@router.post("/google/callback")
-async def google_oauth_callback(request: Request):
-    body = await request.json()
-    session_id = body.get("session_id")
-    if not session_id:
-        raise HTTPException(status_code=400, detail="session_id required")
-
-    # Exchange session_id with Emergent Auth (must be called from backend)
+async def fetch_oauth_profile(session_id: str, request: Request) -> dict:
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            res = await client.get(
-                "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
-                headers={"X-Session-ID": session_id}
-            )
-        if res.status_code != 200:
-            raise HTTPException(status_code=401, detail="Invalid OAuth session")
-        oauth_data = res.json()
+            res = await client.get(OAUTH_SESSION_URL, headers={"X-Session-ID": session_id})
     except httpx.RequestError as e:
-        logger.error(f"OAuth session exchange failed: {e}")
-        raise HTTPException(status_code=503, detail="OAuth service unavailable")
+        logger.error(f"OAuth session exchange failed: {type(e).__name__}")
+        raise HTTPException(status_code=503, detail="Sign-in service unavailable. Try again.")
+    if res.status_code != 200:
+        log_security_event("oauth_failed", request, upstream_status=res.status_code)
+        raise HTTPException(status_code=401, detail="Google sign-in failed. Please try again.")
+    try:
+        data = res.json()
+    except ValueError:
+        data = None
+    if not isinstance(data, dict) or not isinstance(data.get("email"), str) or "@" not in data["email"]:
+        log_security_event("oauth_failed", request, reason="bad_payload")
+        raise HTTPException(status_code=401, detail="Google sign-in failed. Please try again.")
+    return data
 
-    email = oauth_data.get("email", "").lower()
-    name = oauth_data.get("name", "")
-    picture = oauth_data.get("picture", "")
 
-    if not email:
-        raise HTTPException(status_code=400, detail="No email from OAuth provider")
+@router.post("/google/callback")
+@limiter.limit("10/minute")
+async def google_oauth_callback(request: Request, response: Response):
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    session_id = body.get("session_id") if isinstance(body, dict) else None
+    if not isinstance(session_id, str) or not 8 <= len(session_id) <= 512:
+        raise HTTPException(status_code=400, detail="session_id required")
 
-    # Find or create user (email is case-insensitive)
+    oauth_data = await fetch_oauth_profile(session_id, request)
+    email = oauth_data["email"].strip().lower()
+    name = str(oauth_data.get("name") or email.split("@")[0])[:120]
+    picture = oauth_data.get("picture") if isinstance(oauth_data.get("picture"), str) else ""
+
     user = await db.users.find_one({"email": email}, {"_id": 0})
-
     now = datetime.now(timezone.utc).isoformat()
-    trial_days = int(os.environ.get("TRIAL_DAYS", 30))
 
     if not user:
-        code = generate_referral_code()
-        while await db.users.find_one({"referral_code": code}):
-            code = generate_referral_code()
-
-        user_doc = {
+        user = {
             "id": str(uuid.uuid4()),
             "email": email,
             "password_hash": None,
-            "role": "crew",  # Default role for Google OAuth users
+            "role": "crew",
             "name": name,
             "phone": None,
             "is_active": True,
-            "is_verified": True,  # Google already verified email
+            "is_verified": True,
             "agreed_to_terms": True,
             "created_at": now,
             "trial_start_date": now,
-            "trial_end_date": trial_end(trial_days),
+            "trial_end_date": trial_end(int(os.environ.get("TRIAL_DAYS", 30))),
             "subscription_status": "trial",
             "subscription_plan": None,
             "subscription_end": None,
             "points": 50,
-            "referral_code": code,
+            "referral_code": await unique_referral_code(),
             "referred_by": None,
             "bio": "",
             "trade": "",
@@ -241,18 +319,22 @@ async def google_oauth_callback(request: Request):
             "hide_location": False,
             "favorite_crew": [],
             "auth_provider": "google",
+            "token_version": 0,
         }
-        await db.users.insert_one(user_doc)
-        user = user_doc
+        await db.users.insert_one(user)
+        log_security_event("register", request, user=user["id"], role="crew", provider="google")
         await send_welcome_email(name, email, "crew")
     else:
-        # Update profile photo if not set
+        if user.get("role") in PRIVILEGED_ROLES:
+            log_security_event("oauth_privileged_blocked", request, user=user["id"])
+            raise HTTPException(status_code=403, detail="Admin accounts must sign in with email and password")
+        if not user.get("is_active", True):
+            log_security_event("login_suspended", request, user=user["id"], provider="google")
+            raise HTTPException(status_code=403, detail="Account suspended")
         if picture and not user.get("profile_photo"):
-            await db.users.update_one({"email": email}, {"$set": {"profile_photo": picture}})
+            await db.users.update_one({"id": user["id"]}, {"$set": {"profile_photo": picture}})
             user["profile_photo"] = picture
 
-    if not user.get("is_active", True):
-        raise HTTPException(status_code=403, detail="Account suspended")
-
-    token = create_token({"sub": user["id"], "role": user["role"]})
-    return {"access_token": token, "token_type": "bearer", "user": user_to_response(user)}
+    log_security_event("login_success", request, user=user["id"], role=user["role"], provider="google")
+    token = issue_session(response, user)
+    return session_body(token, user)

@@ -1,5 +1,7 @@
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI, APIRouter, Request
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi.errors import RateLimitExceeded
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -7,13 +9,36 @@ import os
 import logging
 from pathlib import Path
 import uuid
-from auth import hash_password
-from database import db
-
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
+from auth import hash_password, limiter, validate_password_strength, log_security_event  # noqa: E402
+from database import db  # noqa: E402
+from utils.storage import init_storage  # noqa: E402
+
+for _var in ("MONGO_URL", "DB_NAME", "JWT_SECRET_KEY", "JWT_EXPIRE_HOURS", "CORS_ORIGINS", "EMERGENT_LLM_KEY", "TRUSTED_PROXY_HOPS"):
+    if not os.environ.get(_var):
+        raise RuntimeError(f"Missing required environment variable: {_var}")
+
 app = FastAPI(title="TheDayLaborers API", version="2.0.0", redirect_slashes=False)
+app.state.limiter = limiter
+
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    log_security_event("rate_limited", request, path=request.url.path)
+    return JSONResponse(status_code=429, content={"detail": "Too many requests. Please slow down and try again."})
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    if request.url.path.startswith("/api/auth") or request.url.path.startswith("/api/users/me"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 api_router = APIRouter(prefix="/api")
 
@@ -48,17 +73,67 @@ uploads_dir = ROOT_DIR / "uploads"
 uploads_dir.mkdir(exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
 
-# CORS
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# CORS: explicit trusted origins only; a wildcard is refused (fail closed)
+_origins = [o.strip().strip('"').rstrip("/") for o in os.environ["CORS_ORIGINS"].split(",") if o.strip()]
+if "*" in _origins:
+    logger.error("CORS_ORIGINS='*' is not allowed with credentialed requests; cross-origin access disabled")
+    _origins = []
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_origins,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-CSRF-Token"],
 )
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+
+async def bootstrap_privileged(role: str, email_var: str, password_var: str, name: str):
+    """Creates the first admin account only from explicit, strong env credentials."""
+    from datetime import datetime, timezone, timedelta
+    import random, string
+    if await db.users.find_one({"role": role}):
+        return
+    email = (os.environ.get(email_var) or "").strip().lower()
+    password = os.environ.get(password_var) or ""
+    if not email or not password:
+        logger.warning(f"No {role} exists and {email_var}/{password_var} are not set; skipping bootstrap")
+        return
+    if validate_password_strength(password):
+        logger.error(f"{password_var} does not meet password policy; {role} not created")
+        return
+    if await db.users.find_one({"email": email}):
+        logger.error(f"{email_var} belongs to an existing non-{role} account; {role} not created")
+        return
+    now = datetime.now(timezone.utc)
+    far = (now + timedelta(days=36500)).isoformat()
+    await db.users.insert_one({
+        "id": str(uuid.uuid4()),
+        "email": email,
+        "password_hash": hash_password(password),
+        "role": role,
+        "name": name,
+        "phone": None,
+        "is_active": True,
+        "is_verified": True,
+        "created_at": now.isoformat(),
+        "trial_start_date": now.isoformat(),
+        "trial_end_date": far,
+        "subscription_status": "active",
+        "subscription_plan": "lifetime",
+        "subscription_end": far,
+        "points": 0,
+        "referral_code": ''.join(random.choices(string.ascii_uppercase + string.digits, k=8)),
+        "referred_by": None,
+        "bio": "", "trade": "", "skills": [], "profile_photo": None,
+        "availability": True, "location": None,
+        "rating": 0.0, "rating_count": 0, "jobs_completed": 0,
+        "company_name": "", "logo": None, "hide_location": False, "favorite_crew": [],
+        "auth_provider": "email", "token_version": 0,
+    })
+    logger.info(f"{role} bootstrapped from environment")
 
 
 @app.on_event("startup")
@@ -77,74 +152,29 @@ async def startup_event():
     except Exception as e:
         logger.warning(f"Index creation: {e}")
 
-    # Create default Super Admin if not exists
-    from datetime import datetime, timezone, timedelta
-    import random, string
+    # Security collections: TTL cleanup + single-use lookups
+    try:
+        await db.revoked_tokens.create_index("jti", unique=True)
+        await db.revoked_tokens.create_index("expires_at", expireAfterSeconds=0)
+        await db.password_resets.delete_many({"token": {"$exists": True}})
+        await db.password_resets.create_index("token_hash", unique=True, sparse=True)
+        await db.password_resets.create_index("expires_at", expireAfterSeconds=0)
+        await db.ws_tickets.create_index("ticket_hash", unique=True)
+        await db.ws_tickets.create_index("expires_at", expireAfterSeconds=0)
+        await db.login_attempts.create_index("email", unique=True)
+        await db.files.create_index("storage_path")
+    except Exception as e:
+        logger.warning(f"Security index creation: {e}")
 
-    super_admin_email = os.environ.get("SUPER_ADMIN_EMAIL", "superadmin@thedaylaborers.com")
-    super_admin_password = os.environ.get("SUPER_ADMIN_PASSWORD", "SuperAdmin@123")
-    existing_super = await db.users.find_one({"role": "super_admin"})
-    if not existing_super:
-        code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-        now = datetime.now(timezone.utc).isoformat()
-        super_doc = {
-            "id": str(uuid.uuid4()),
-            "email": super_admin_email.lower(),
-            "password_hash": hash_password(super_admin_password),
-            "role": "super_admin",
-            "name": "Super Administrator",
-            "phone": None,
-            "is_active": True,
-            "is_verified": True,
-            "created_at": now,
-            "trial_start_date": now,
-            "trial_end_date": (datetime.now(timezone.utc) + timedelta(days=36500)).isoformat(),
-            "subscription_status": "active",
-            "subscription_plan": "lifetime",
-            "subscription_end": (datetime.now(timezone.utc) + timedelta(days=36500)).isoformat(),
-            "points": 0,
-            "referral_code": code,
-            "referred_by": None,
-            "bio": "", "trade": "", "skills": [], "profile_photo": None,
-            "availability": True, "location": None,
-            "rating": 0.0, "rating_count": 0, "jobs_completed": 0,
-            "company_name": "", "logo": None, "hide_location": False, "favorite_crew": []
-        }
-        await db.users.insert_one(super_doc)
-        logger.info(f"Super Admin created: {super_admin_email}")
+    try:
+        init_storage()
+        logger.info("Object storage initialized")
+    except Exception as e:
+        logger.error(f"Object storage init failed: {type(e).__name__}")
 
-    # Create default Admin if not exists
-    admin_email = os.environ.get("ADMIN_EMAIL", "admin@thedaylaborers.com")
-    admin_password = os.environ.get("ADMIN_PASSWORD", "Admin@123")
-    existing_admin = await db.users.find_one({"role": "admin"})
-    if not existing_admin:
-        code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-        now = datetime.now(timezone.utc).isoformat()
-        admin_doc = {
-            "id": str(uuid.uuid4()),
-            "email": admin_email.lower(),
-            "password_hash": hash_password(admin_password),
-            "role": "admin",
-            "name": "Platform Admin",
-            "phone": None,
-            "is_active": True,
-            "is_verified": True,
-            "created_at": now,
-            "trial_start_date": now,
-            "trial_end_date": (datetime.now(timezone.utc) + timedelta(days=36500)).isoformat(),
-            "subscription_status": "active",
-            "subscription_plan": "lifetime",
-            "subscription_end": (datetime.now(timezone.utc) + timedelta(days=36500)).isoformat(),
-            "points": 0,
-            "referral_code": code,
-            "referred_by": None,
-            "bio": "", "trade": "", "skills": [], "profile_photo": None,
-            "availability": True, "location": None,
-            "rating": 0.0, "rating_count": 0, "jobs_completed": 0,
-            "company_name": "", "logo": None, "hide_location": False, "favorite_crew": []
-        }
-        await db.users.insert_one(admin_doc)
-        logger.info(f"Admin created: {admin_email}")
+    from datetime import datetime, timezone
+    await bootstrap_privileged("super_admin", "SUPER_ADMIN_EMAIL", "SUPER_ADMIN_PASSWORD", "Super Administrator")
+    await bootstrap_privileged("admin", "ADMIN_EMAIL", "ADMIN_PASSWORD", "Platform Admin")
 
     # Init default settings
     existing_settings = await db.settings.find_one({})
