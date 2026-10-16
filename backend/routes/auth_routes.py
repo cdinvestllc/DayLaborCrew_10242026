@@ -128,9 +128,10 @@ async def register(data: UserCreate, request: Request, response: Response):
         "token_version": 0,
     }
 
-    if data.referral_code_used:
-        referrer = await db.users.find_one({"referral_code": data.referral_code_used})
-        if referrer:
+    referral_code = (data.referral_code_used or "").strip().upper()
+    if referral_code:
+        referrer = await db.users.find_one({"referral_code": referral_code, "is_active": True})
+        if referrer and referrer.get("email") != user_doc["email"]:
             user_doc["referred_by"] = referrer["id"]
             await db.users.update_one({"id": referrer["id"]}, {"$inc": {"points": 100}})
             await db.referrals.insert_one({
@@ -336,5 +337,26 @@ async def google_oauth_callback(request: Request, response: Response):
             user["profile_photo"] = picture
 
     log_security_event("login_success", request, user=user["id"], role=user["role"], provider="google")
+    token = issue_session(response, user)
+    return session_body(token, user)
+
+
+@router.post("/convert-to-contractor")
+async def convert_to_contractor(request: Request, response: Response, current_user: dict = Depends(get_current_user)):
+    """Crew member upgrades to a contractor account; history and ratings are kept."""
+    if current_user["role"] != "crew":
+        raise HTTPException(status_code=400, detail="Only crew accounts can convert to contractor")
+    body = await request.json()
+    company = str((body or {}).get("company_name", "")).strip()
+    if not 2 <= len(company) <= 120:
+        raise HTTPException(status_code=400, detail="Company name is required")
+    active_jobs = await db.jobs.count_documents({"crew_accepted": current_user["id"], "status": {"$in": ["open", "fulfilled", "in_progress", "completed_pending_review"]}})
+    if active_jobs:
+        raise HTTPException(status_code=400, detail="Finish or leave your active jobs before converting")
+    await db.users.update_one({"id": current_user["id"], "role": "crew"}, {
+        "$set": {"role": "contractor", "company_name": company, "converted_from_crew_at": datetime.now(timezone.utc).isoformat()},
+        "$inc": {"token_version": 1}})
+    user = await db.users.find_one({"id": current_user["id"]}, {"_id": 0})
+    log_security_event("role_converted", request, user=user["id"], role="contractor")
     token = issue_session(response, user)
     return session_body(token, user)

@@ -13,7 +13,12 @@ import {
   Navigation, Send, CheckCircle, Shield, Loader2
 } from "lucide-react";
 import BoostJobModal from "../components/BoostJobModal";
+import OfferCrewModal from "../components/OfferCrewModal";
+import AddressAutocomplete from "../components/AddressAutocomplete";
+import JobMediaInputs from "../components/JobMediaInputs";
 import { US_STATES } from "../lib/usStates";
+import SafeImage from "../components/SafeImage";
+import { resolveImageUrl } from "../lib/media";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -50,49 +55,6 @@ function RatingModal({ job, onClose, onSubmit }) {
   );
 }
 
-function OfferCrewModal({ crew, jobs, onClose }) {
-  const [selectedJob, setSelectedJob] = useState("");
-  const [sending, setSending] = useState(false);
-
-  const openJobs = jobs.filter(j => ["open", "fulfilled"].includes(j.status));
-
-  const sendOffer = async () => {
-    if (!selectedJob) return toast.error("Select a job first");
-    setSending(true);
-    try {
-      await axios.post(`${API}/jobs/${selectedJob}/invite`, { crew_ids: [crew.id] });
-      toast.success(`Offer sent to ${crew.name}!`);
-      onClose();
-    } catch (e) {
-      toast.error(e?.response?.data?.detail || "Failed to send offer");
-    }
-    setSending(false);
-  };
-
-  return (
-    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-      <div className="card max-w-sm w-full p-6 relative">
-        <button onClick={onClose} className="absolute top-4 right-4 text-slate-400"><X className="w-5 h-5" /></button>
-        <h2 className="font-extrabold text-[#050A30] dark:text-white text-lg mb-1" style={{ fontFamily: "Manrope, sans-serif" }}>Offer Job to {crew.name}</h2>
-        <p className="text-slate-500 text-sm mb-4">Select a job to offer to this crew member</p>
-        <select value={selectedJob} onChange={e => setSelectedJob(e.target.value)}
-          className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-[#0000FF] dark:bg-slate-800 dark:text-white mb-4"
-          data-testid="offer-job-select">
-          <option value="">Select a job...</option>
-          {openJobs.map(j => <option key={j.id} value={j.id}>{j.title} — ${j.pay_rate}/hr</option>)}
-        </select>
-        {openJobs.length === 0 && <p className="text-amber-600 text-sm mb-4">No open jobs available. Post a job first.</p>}
-        <button onClick={sendOffer} disabled={sending || !selectedJob}
-          className="w-full bg-[#0000FF] text-white py-3 rounded-xl font-bold hover:bg-blue-700 disabled:opacity-60 flex items-center justify-center gap-2"
-          data-testid="send-offer-btn">
-          {sending ? <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white" /> : <Send className="w-4 h-4" />}
-          {sending ? "Sending..." : "Send Offer"}
-        </button>
-      </div>
-    </div>
-  );
-}
-
 export default function ContractorDashboard() {
   const { user, setUser } = useAuth();
   const { addListener, connected } = useWebSocket();
@@ -113,7 +75,7 @@ export default function ContractorDashboard() {
   const [pollingVerified, setPollingVerified] = useState(false);
   const [jobForm, setJobForm] = useState({
     title: "", description: "", trade: "", crew_needed: 1,
-    start_time: "", end_time: "", pay_rate: "", address: "", is_emergency: false
+    start_time: "", end_time: "", pay_rate: "", address: "", is_emergency: false, lat: null, lng: null, city: "", state: "", images: []
   });
 
   const fetchJobs = useCallback(async () => {
@@ -198,6 +160,8 @@ export default function ContractorDashboard() {
   };
 
   const createJob = async (e) => {
+    e?.preventDefault();
+    if (!window.confirm(`Publish "${jobForm.title}" now? Crew will be notified immediately.`)) return;
     if (jobForm.end_time && jobForm.start_time && new Date(jobForm.end_time) <= new Date(jobForm.start_time)) {
       return toast.error("End time must be after start time");
     }
@@ -209,7 +173,7 @@ export default function ContractorDashboard() {
       });
       toast.success("Job posted! Workers will be notified instantly.");
       setShowJobForm(false);
-      setJobForm({ title: "", description: "", trade: "", crew_needed: 1, start_time: "", end_time: "", pay_rate: "", address: "", is_emergency: false });
+      setJobForm({ title: "", description: "", trade: "", crew_needed: 1, start_time: "", end_time: "", pay_rate: "", address: "", is_emergency: false, lat: null, lng: null, city: "", state: "", images: [] });
       fetchJobs();
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Failed to post job");
@@ -390,7 +354,7 @@ export default function ContractorDashboard() {
                     data-testid={`crew-member-${member.id}`}>
                     <div className="w-9 h-9 rounded-full overflow-hidden bg-[#050A30] flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
                       {member.profile_photo
-                        ? <img src={`${process.env.REACT_APP_BACKEND_URL}${member.profile_photo}`} alt="" className="w-full h-full object-cover" />
+                        ? <SafeImage src={resolveImageUrl(member.profile_photo)} alt="" className="w-full h-full object-cover" />
                         : member.name?.[0]?.toUpperCase()}
                     </div>
                     <div className="flex-1 min-w-0">
@@ -432,6 +396,7 @@ export default function ContractorDashboard() {
               jobs={myMapJobs}
               crew={crew}
               userLocation={userLocation}
+              onCrewOffer={setOfferCrew}
               height="580px"
               flyToCoords={flyToCoords}
             />
@@ -532,8 +497,8 @@ export default function ContractorDashboard() {
               </div>
 
               <div>
-                <label className="block text-sm font-semibold text-[#050A30] dark:text-white mb-1">Description</label>
-                <textarea value={jobForm.description} onChange={e => updateForm("description", e.target.value)} rows={3}
+                <label className="block text-sm font-semibold text-[#050A30] dark:text-white mb-1">Description *</label>
+                <textarea required minLength={10} value={jobForm.description} onChange={e => updateForm("description", e.target.value)} rows={3}
                   className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-[#0000FF] dark:bg-slate-800 dark:text-white"
                   placeholder="Describe the work..." data-testid="job-desc-input" />
               </div>
@@ -582,17 +547,29 @@ export default function ContractorDashboard() {
                 </div>
                 <div>
                   <label className="block text-sm font-semibold text-[#050A30] dark:text-white mb-1">Job Location *</label>
-                  <input type="text" required value={jobForm.address} onChange={e => updateForm("address", e.target.value)}
-                    className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-[#0000FF] dark:bg-slate-800 dark:text-white"
-                    placeholder="123 Main St, Miami, FL" data-testid="job-address-input" />
+                  <AddressAutocomplete required value={jobForm.address} testId="job-address-input" placeholder="123 Main St, Miami, FL"
+                    onChange={v => setJobForm(f => ({ ...f, address: v, lat: null, lng: null }))}
+                    onSelect={({ address, lat, lng, city, state }) => setJobForm(f => ({ ...f, address, lat, lng, city, state }))} />
                 </div>
               </div>
 
-              <button type="submit"
-                className="w-full bg-[#0000FF] text-white py-3 rounded-xl font-bold hover:bg-blue-700 transition-colors"
-                data-testid="submit-job-btn">
-                Post Job Now
-              </button>
+              <JobMediaInputs
+                images={jobForm.images}
+                onImages={imgs => updateForm("images", imgs)}
+                onTranscript={text => setJobForm(f => ({ ...f, description: f.description ? `${f.description} ${text}` : text }))} />
+
+              <div className="flex gap-3">
+                <button type="button" onClick={() => setShowJobForm(false)}
+                  className="flex-1 border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-200 py-3 rounded-xl font-bold hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
+                  data-testid="cancel-job-btn">
+                  Cancel
+                </button>
+                <button type="submit"
+                  className="flex-[2] bg-[#0000FF] text-white py-3 rounded-xl font-bold hover:bg-blue-700 transition-colors"
+                  data-testid="submit-job-btn">
+                  Post Job Now
+                </button>
+              </div>
             </form>
           </div>
         </div>

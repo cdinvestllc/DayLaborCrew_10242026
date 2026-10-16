@@ -72,6 +72,7 @@ app.include_router(api_router)
 uploads_dir = ROOT_DIR / "uploads"
 uploads_dir.mkdir(exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
+app.mount("/api/uploads", StaticFiles(directory=str(uploads_dir)), name="api_uploads")  # legacy image paths
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -163,6 +164,11 @@ async def startup_event():
         await db.ws_tickets.create_index("expires_at", expireAfterSeconds=0)
         await db.login_attempts.create_index("email", unique=True)
         await db.files.create_index("storage_path")
+        await db.ratings.create_index([("job_id", 1), ("rater_id", 1), ("rated_id", 1)], unique=True)
+        await db.referrals.create_index("referred_id", unique=True)
+        await db.contact_unlocks.create_index([("buyer_id", 1), ("target_id", 1)], unique=True)
+        await db.guest_jobs.create_index("session_id")
+        await db.payment_transactions.create_index("session_id")
     except Exception as e:
         logger.warning(f"Security index creation: {e}")
 
@@ -175,7 +181,19 @@ async def startup_event():
     except Exception as e:
         logger.error(f"Object storage init failed: {type(e).__name__}")
 
-    from datetime import datetime, timezone
+    from datetime import datetime, timezone, timedelta
+    try:
+        from routes.payment_routes import migrate_legacy_plans
+        await migrate_legacy_plans()
+        async for c in db.users.find({"is_verified_contractor": True, "verified_expires_at": {"$exists": False}}, {"_id": 0, "id": 1, "verified_at": 1}):
+            try:
+                start = datetime.fromisoformat(c.get("verified_at") or "")
+                start = start if start.tzinfo else start.replace(tzinfo=timezone.utc)
+            except ValueError:
+                start = datetime.now(timezone.utc)
+            await db.users.update_one({"id": c["id"]}, {"$set": {"verified_expires_at": (start + timedelta(days=365)).isoformat()}})
+    except Exception as e:
+        logger.error(f"Data migration failed: {e}")
     await bootstrap_privileged("super_admin", "SUPER_ADMIN_EMAIL", "SUPER_ADMIN_PASSWORD", "Super Administrator")
     await bootstrap_privileged("admin", "ADMIN_EMAIL", "ADMIN_PASSWORD", "Platform Admin")
 

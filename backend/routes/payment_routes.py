@@ -24,10 +24,86 @@ PAYPAL_BASE_URL = "https://api-m.sandbox.paypal.com" if PAYPAL_MODE == "sandbox"
 
 # Subscription plans (prices defined server-side for security)
 PLANS = {
-    "daily": {"amount": 4.99, "days": 1, "label": "Daily Pass"},
-    "weekly": {"amount": 24.99, "days": 7, "label": "Weekly Pass"},
-    "monthly": {"amount": 79.99, "days": 30, "label": "Monthly Pass"},
+    "crew_monthly": {"amount": 19.99, "days": 30, "label": "Crew Monthly", "role": "crew"},
+    "crew_quarterly": {"amount": 39.99, "days": 90, "label": "Crew Quarterly", "role": "crew"},
+    "crew_annual": {"amount": 99.00, "days": 365, "label": "Crew Annual", "role": "crew"},
+    "contractor_basic": {"amount": 19.99, "days": 30, "label": "Contractor Basic", "role": "contractor", "job_posts": 4},
+    "contractor_pro": {"amount": 39.99, "days": 30, "label": "Contractor Pro", "role": "contractor", "job_posts": 10},
+    "contractor_business": {"amount": 59.00, "days": 30, "label": "Contractor Business", "role": "contractor", "job_posts": 20},
 }
+LEGACY_PLAN_MAP = {"crew": "crew_monthly", "contractor": "contractor_basic"}
+TRIAL_JOB_POSTS = 4
+CONTACT_UNLOCK_PRICE = 2.99
+GUEST_JOB_PRICE = 9.99
+STAFF_ROLES = ("admin", "super_admin")
+
+
+def _parse_dt(value):
+    try:
+        dt = datetime.fromisoformat(value) if isinstance(value, str) else value
+        return dt if dt is None or dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def subscription_state(user: dict) -> dict:
+    """Server-side source of truth for access: active paid plan or unexpired trial."""
+    now = datetime.now(timezone.utc)
+    if user.get("role") in STAFF_ROLES or user.get("subscription_plan") == "lifetime":
+        return {"active": True, "plan": user.get("subscription_plan") or "staff", "period_start": None, "trial": False}
+    end = _parse_dt(user.get("subscription_end"))
+    plan = user.get("subscription_plan")
+    if user.get("subscription_status") == "active" and end and end > now:
+        if plan not in PLANS:
+            plan = LEGACY_PLAN_MAP.get(user.get("role"), "crew_monthly")
+        days = PLANS[plan]["days"]
+        return {"active": True, "plan": plan, "period_start": (end - timedelta(days=days)).isoformat()[:10], "trial": False}
+    trial_end = _parse_dt(user.get("trial_end_date"))
+    if trial_end and trial_end > now and user.get("subscription_status") in (None, "trial"):
+        return {"active": True, "plan": "trial", "period_start": "trial", "trial": True}
+    return {"active": False, "plan": plan, "period_start": None, "trial": False}
+
+
+def require_active_subscription(user: dict):
+    if not subscription_state(user)["active"]:
+        raise HTTPException(status_code=402, detail="An active subscription is required. Please choose a plan.")
+
+
+def job_post_quota(user: dict) -> tuple[int, str]:
+    state = subscription_state(user)
+    if not state["active"]:
+        raise HTTPException(status_code=402, detail="An active contractor plan is required to post jobs.")
+    if state["plan"] == "trial":
+        return TRIAL_JOB_POSTS, "trial"
+    if state["plan"] == "lifetime" or state["plan"] == "staff":
+        return 10**6, "unlimited"
+    return PLANS.get(state["plan"], PLANS["contractor_basic"]).get("job_posts", 4), state["period_start"]
+
+
+async def consume_job_post_credit(user: dict):
+    """Atomically uses one job post from the current billing period."""
+    quota, period = job_post_quota(user)
+    uid = user["id"]
+    res = await db.users.update_one({"id": uid, "job_post_period": period, "job_posts_used": {"$lt": quota}},
+                                    {"$inc": {"job_posts_used": 1}})
+    if res.modified_count:
+        return
+    res = await db.users.update_one({"id": uid, "job_post_period": {"$ne": period}},
+                                    {"$set": {"job_post_period": period, "job_posts_used": 1}})
+    if res.modified_count:
+        return
+    raise HTTPException(status_code=402, detail=f"You've used all {quota} job posts for this billing period. Upgrade your plan to post more.")
+
+
+async def refund_job_post_credit(user: dict):
+    await db.users.update_one({"id": user["id"], "job_posts_used": {"$gt": 0}}, {"$inc": {"job_posts_used": -1}})
+
+
+async def migrate_legacy_plans():
+    """Moves legacy daily/weekly/monthly subscribers onto the new plan names (end dates preserved)."""
+    for role, plan in LEGACY_PLAN_MAP.items():
+        await db.users.update_many({"role": role, "subscription_plan": {"$in": ["daily", "weekly", "monthly"]}},
+                                   {"$set": {"subscription_plan": plan, "legacy_plan_migrated": True}})
 
 # Default verified contractor fee (admin can override in settings)
 DEFAULT_VERIFIED_FEE = 39.99
@@ -65,7 +141,9 @@ def now_str():
 
 async def resolve_plan_price(plan: str) -> dict:
     """Get plan with DB-overridden prices."""
-    info = {**PLANS.get(plan, PLANS["monthly"])}
+    if plan not in PLANS:
+        raise HTTPException(status_code=400, detail="Invalid plan")
+    info = {**PLANS[plan]}
     settings = await db.settings.find_one({}, {"_id": 0})
     if settings:
         info["amount"] = settings.get(f"{plan}_price", info["amount"])
@@ -94,7 +172,7 @@ async def apply_coupon(code: str, plan: str, amount: float) -> tuple[float, dict
 
 
 @router.get("/coupon/{code}")
-async def validate_coupon(code: str, plan: str = "monthly", current_user: dict = Depends(get_current_user)):
+async def validate_coupon(code: str, plan: str = "crew_monthly", current_user: dict = Depends(get_current_user)):
     """Validate coupon and return discount info."""
     coupon = await db.coupons.find_one({"code": code.upper()}, {"_id": 0, "password_hash": 0})
     if not coupon:
@@ -117,32 +195,21 @@ async def validate_coupon(code: str, plan: str = "monthly", current_user: dict =
         "final_price": max(discounted, 0.50),
         "uses_remaining": coupon["usage_limit"] - coupon.get("usage_count", 0)
     }
-    credentials = base64.b64encode(f"{PAYPAL_CLIENT_ID}:{PAYPAL_SECRET}".encode()).decode()
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"{PAYPAL_BASE_URL}/v1/oauth2/token",
-            headers={"Authorization": f"Basic {credentials}", "Content-Type": "application/x-www-form-urlencoded"},
-            data={"grant_type": "client_credentials"}
-        )
-        resp.raise_for_status()
-        return resp.json()["access_token"]
 
 
-async def update_subscription(user_id: str, plan: str, days: int, payment_method: str, amount: float, coupon_id: str = None):
-    """Update user subscription after successful payment."""
+async def update_subscription(user_id: str, plan: str, days: int, payment_method: str, amount: float, coupon_code: str = None):
+    """Update user subscription after verified payment; renewals of the same plan extend the period."""
     now = datetime.now(timezone.utc)
-    sub_end = (now + timedelta(days=days)).isoformat()
-    await db.users.update_one(
-        {"id": user_id},
-        {"$set": {
-            "subscription_status": "active",
-            "subscription_plan": plan,
-            "subscription_end": sub_end
-        }}
-    )
-    # Increment coupon usage
-    if coupon_id:
-        await db.coupons.update_one({"_id": coupon_id}, {"$inc": {"usage_count": 1}})
+    user = await db.users.find_one({"id": user_id}, {"_id": 0}) or {}
+    current_end = _parse_dt(user.get("subscription_end"))
+    base = current_end if (user.get("subscription_plan") == plan and current_end and current_end > now) else now
+    sub_end = (base + timedelta(days=days)).isoformat()
+    update = {"subscription_status": "active", "subscription_plan": plan, "subscription_end": sub_end}
+    if user.get("subscription_plan") != plan:
+        update.update({"job_post_period": None, "job_posts_used": 0})
+    await db.users.update_one({"id": user_id}, {"$set": update})
+    if coupon_code:
+        await db.coupons.update_one({"code": coupon_code}, {"$inc": {"usage_count": 1}})
     user = await db.users.find_one({"id": user_id}, {"_id": 0})
     if user:
         await send_subscription_email(user["email"], user["name"], plan, sub_end)
@@ -150,21 +217,25 @@ async def update_subscription(user_id: str, plan: str, days: int, payment_method
 
 
 @router.get("/plans")
-async def get_plans():
-    settings = await db.settings.find_one({}, {"_id": 0})
-    if settings:
-        PLANS["daily"]["amount"] = settings.get("daily_price", PLANS["daily"]["amount"])
-        PLANS["weekly"]["amount"] = settings.get("weekly_price", PLANS["weekly"]["amount"])
-        PLANS["monthly"]["amount"] = settings.get("monthly_price", PLANS["monthly"]["amount"])
-    return PLANS
+async def get_plans(role: str = None):
+    plans = {k: await resolve_plan_price(k) for k in PLANS}
+    if role in ("crew", "contractor"):
+        plans = {k: v for k, v in plans.items() if v["role"] == role}
+    return plans
+
+
+async def _validate_plan_for_user(plan: str, user: dict):
+    if plan not in PLANS:
+        raise HTTPException(status_code=400, detail="Invalid plan")
+    if PLANS[plan]["role"] != user.get("role"):
+        raise HTTPException(status_code=400, detail="This plan is not available for your account type")
 
 
 # ─── Stripe ──────────────────────────────────────────────────────────────────
 
 @router.post("/stripe/create-session")
 async def stripe_create_session(data: CheckoutRequest, current_user: dict = Depends(get_current_user)):
-    if data.plan not in PLANS:
-        raise HTTPException(status_code=400, detail="Invalid plan")
+    await _validate_plan_for_user(data.plan, current_user)
 
     plan_info = await resolve_plan_price(data.plan)
     final_amount = plan_info["amount"]
@@ -173,8 +244,6 @@ async def stripe_create_session(data: CheckoutRequest, current_user: dict = Depe
     if data.coupon_code:
         final_amount, coupon_doc = await apply_coupon(data.coupon_code, data.plan, final_amount)
         coupon_code = data.coupon_code.upper()
-        if coupon_doc:
-            await db.coupons.update_one({"code": coupon_code}, {"$inc": {"usage_count": 1}})
 
     origin = data.origin_url.rstrip("/")
     success_url = f"{origin}/subscription?session_id={{CHECKOUT_SESSION_ID}}&method=stripe"
@@ -220,18 +289,20 @@ async def stripe_payment_status(session_id: str, request: Request, current_user:
     if status.metadata.get("user_id") not in (None, current_user["id"]) and current_user.get("role") not in ("admin", "super_admin"):
         raise HTTPException(status_code=404, detail="Payment not found")
 
-    if status.payment_status == "paid" and (not tx or tx.get("payment_status") != "paid"):
-        plan = status.metadata.get("plan", "monthly")
-        user_id = status.metadata.get("user_id", current_user["id"])
-        plan_info = PLANS.get(plan, PLANS["monthly"])
-        sub_end = await update_subscription(user_id, plan, plan_info["days"], "stripe", status.amount_total / 100)
-
-        await db.payment_transactions.update_one(
-            {"session_id": session_id},
-            {"$set": {"payment_status": "paid", "updated_at": now_str()}}
-        )
+    if status.payment_status == "paid":
+        await fulfill_subscription_tx(session_id)
 
     return {"status": status.status, "payment_status": status.payment_status}
+
+
+async def fulfill_subscription_tx(session_id: str):
+    """Grants the plan exactly once for a paid, server-verified transaction."""
+    tx = await db.payment_transactions.find_one_and_update(
+        {"session_id": session_id, "payment_status": {"$ne": "paid"}, "plan": {"$in": list(PLANS)}},
+        {"$set": {"payment_status": "paid", "updated_at": now_str()}})
+    if tx:
+        await update_subscription(tx["user_id"], tx["plan"], PLANS[tx["plan"]]["days"], tx.get("payment_method", "stripe"),
+                                  tx.get("amount", 0), tx.get("coupon_code"))
 
 
 @router.post("/stripe/webhook")
@@ -241,10 +312,7 @@ async def stripe_webhook(request: Request):
         stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url="")
         event = await stripe.handle_webhook(body, request.headers.get("Stripe-Signature", ""))
         if event.payment_status == "paid":
-            await db.payment_transactions.update_one(
-                {"session_id": event.session_id},
-                {"$set": {"payment_status": "paid", "updated_at": now_str()}}
-            )
+            await fulfill_subscription_tx(event.session_id)
     except Exception as e:
         logger.warning(f"Stripe webhook error: {e}")
     return {"status": "ok"}
@@ -254,8 +322,7 @@ async def stripe_webhook(request: Request):
 
 @router.post("/paypal/create-order")
 async def paypal_create_order(data: CheckoutRequest, current_user: dict = Depends(get_current_user)):
-    if data.plan not in PLANS:
-        raise HTTPException(status_code=400, detail="Invalid plan")
+    await _validate_plan_for_user(data.plan, current_user)
 
     plan_info = await resolve_plan_price(data.plan)
     final_amount = plan_info["amount"]
@@ -264,8 +331,6 @@ async def paypal_create_order(data: CheckoutRequest, current_user: dict = Depend
     if data.coupon_code:
         final_amount, coupon_doc = await apply_coupon(data.coupon_code, data.plan, final_amount)
         coupon_code = data.coupon_code.upper()
-        if coupon_doc:
-            await db.coupons.update_one({"code": coupon_code}, {"$inc": {"usage_count": 1}})
 
     access_token = await get_paypal_token()
 
@@ -329,13 +394,11 @@ async def paypal_capture(order_id: str, plan: str, current_user: dict = Depends(
         result = resp.json()
 
     status = result.get("status")
-    if status == "COMPLETED":
-        plan_info = PLANS.get(plan, PLANS["monthly"])
-        await update_subscription(current_user["id"], plan, plan_info["days"], "paypal", plan_info["amount"])
-        await db.payment_transactions.update_one(
-            {"session_id": order_id},
-            {"$set": {"payment_status": "paid", "updated_at": now_str()}}
-        )
+    captured = (result.get("purchase_units") or [{}])[0].get("payments", {}).get("captures", [{}])[0].get("amount", {})
+    if status == "COMPLETED" and abs(float(captured.get("value", 0)) - float(tx.get("amount", 0))) < 0.01:
+        await fulfill_subscription_tx(order_id)
+    elif status == "COMPLETED":
+        logger.error(f"PayPal capture amount mismatch for order {order_id}")
 
     return {"status": status, "order_id": order_id}
 
@@ -344,38 +407,23 @@ async def paypal_capture(order_id: str, plan: str, current_user: dict = Depends(
 
 @router.get("/subscription/status")
 async def subscription_status(current_user: dict = Depends(get_current_user)):
-    from datetime import datetime, timezone
-    user = await db.users.find_one({"id": current_user["id"]}, {"_id": 0})
-    sub_status = user.get("subscription_status", "trial")
-    sub_end = user.get("subscription_end")
-    trial_end = user.get("trial_end_date")
-
-    days_left = 0
-    if sub_status == "active" and sub_end:
-        try:
-            end = datetime.fromisoformat(sub_end)
-            days_left = max(0, (end - datetime.now(timezone.utc)).days)
-            if days_left == 0:
-                await db.users.update_one({"id": current_user["id"]}, {"$set": {"subscription_status": "expired"}})
-                sub_status = "expired"
-        except Exception:
-            pass
-    elif sub_status == "trial" and trial_end:
-        try:
-            end = datetime.fromisoformat(trial_end)
-            days_left = max(0, (end - datetime.now(timezone.utc)).days)
-            if days_left == 0:
-                await db.users.update_one({"id": current_user["id"]}, {"$set": {"subscription_status": "expired"}})
-                sub_status = "expired"
-        except Exception:
-            pass
-
-    return {
-        "status": sub_status,
-        "plan": user.get("subscription_plan"),
-        "days_remaining": days_left,
-        "subscription_end": sub_end or trial_end
+    state = subscription_state(current_user)
+    now = datetime.now(timezone.utc)
+    end = _parse_dt(current_user.get("subscription_end")) if not state["trial"] else _parse_dt(current_user.get("trial_end_date"))
+    status = "trial" if state["trial"] else ("active" if state["active"] else "expired")
+    if not state["active"] and current_user.get("subscription_status") in ("active", "trial"):
+        await db.users.update_one({"id": current_user["id"]}, {"$set": {"subscription_status": "expired"}})
+    result = {
+        "status": status,
+        "plan": state["plan"],
+        "days_remaining": max(0, (end - now).days) if end and state["active"] else 0,
+        "subscription_end": end.isoformat() if end else None,
     }
+    if current_user.get("role") == "contractor" and state["active"]:
+        quota, period = job_post_quota(current_user)
+        used = current_user.get("job_posts_used", 0) if current_user.get("job_post_period") == period else 0
+        result.update({"job_posts_quota": quota, "job_posts_used": used, "job_posts_remaining": max(0, quota - used)})
+    return result
 
 
 # ─── Featured / Boost Job ─────────────────────────────────────────────────────
@@ -526,8 +574,9 @@ async def boost_paypal_capture(order_id: str, job_id: str, current_user: dict = 
 async def create_verified_contractor_session(request: Request, current_user: dict = Depends(get_current_user)):
     if current_user.get("role") != "contractor":
         raise HTTPException(status_code=403, detail="Only contractors can purchase verification")
-    if current_user.get("is_verified_contractor"):
-        raise HTTPException(status_code=400, detail="You are already a verified contractor")
+    expires = _parse_dt(current_user.get("verified_expires_at"))
+    if current_user.get("is_verified_contractor") and expires and expires - datetime.now(timezone.utc) > timedelta(days=30):
+        raise HTTPException(status_code=400, detail="Your verification is active. Renewal opens 30 days before it expires.")
 
     # Check for existing pending transaction (prevent duplicate sessions)
     existing = await db.payment_transactions.find_one({
@@ -583,16 +632,21 @@ async def verified_contractor_status(session_id: str, request: Request, current_
     if status.metadata.get("user_id") not in (None, current_user["id"]) and current_user.get("role") not in ("admin", "super_admin"):
         raise HTTPException(status_code=404, detail="Payment not found")
 
+    paid_tx = None
     if status.payment_status == "paid":
-        user_id = status.metadata.get("user_id", current_user["id"])
-        # Grant verified status
+        paid_tx = await db.payment_transactions.find_one_and_update(
+            {"session_id": session_id, "plan": "verified_contractor", "payment_status": {"$ne": "paid"}},
+            {"$set": {"payment_status": "paid", "updated_at": now_str()}})
+    if paid_tx:
+        user_id = paid_tx["user_id"]
+        target = await db.users.find_one({"id": user_id}, {"_id": 0, "verified_expires_at": 1}) or {}
+        now = datetime.now(timezone.utc)
+        current = _parse_dt(target.get("verified_expires_at"))
+        new_expiry = (max(current, now) if current else now) + timedelta(days=365)
         await db.users.update_one(
             {"id": user_id},
-            {"$set": {"is_verified_contractor": True, "verified_at": now_str()}}
-        )
-        await db.payment_transactions.update_one(
-            {"session_id": session_id},
-            {"$set": {"payment_status": "paid", "updated_at": now_str()}}
+            {"$set": {"is_verified_contractor": True, "verified_at": now_str(), "verified_expires_at": new_expiry.isoformat(),
+                      "verification_expired": False}}
         )
         # Send confirmation email (fire & forget)
         try:
@@ -618,3 +672,151 @@ async def get_verified_fee():
     """Public endpoint to get the current verification fee."""
     settings = await db.settings.find_one({}, {"_id": 0})
     return {"fee": float((settings or {}).get("verified_contractor_fee", DEFAULT_VERIFIED_FEE))}
+
+
+# ─── Contact Unlock ($2.99, Stripe) ──────────────────────────────────────────
+
+async def _stripe_checkout(request: Request, origin: str, amount: float, success_url: str, cancel_url: str, metadata: dict):
+    stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=f"{origin}/api/payments/stripe/webhook")
+    return await stripe.create_checkout_session(CheckoutSessionRequest(
+        amount=float(amount), currency="usd", success_url=success_url, cancel_url=cancel_url, metadata=metadata))
+
+
+def _origin(request: Request, body: dict) -> str:
+    from urllib.parse import urlparse
+    origin = (body or {}).get("origin_url") or ""
+    allowed = [o.strip().strip('"').rstrip("/") for o in os.environ["CORS_ORIGINS"].split(",")]
+    parsed = urlparse(origin)
+    origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme in ("http", "https") and parsed.netloc else ""
+    if origin not in allowed:
+        origin = allowed[0]
+    return origin
+
+
+@router.post("/contact-unlock/{target_id}")
+async def create_contact_unlock(target_id: str, request: Request, current_user: dict = Depends(get_current_user)):
+    from utils.profile_view import has_contact_access
+    target = await db.users.find_one({"id": target_id, "is_active": True, "role": {"$in": ["crew", "contractor"]}}, {"_id": 0})
+    if not target or target_id == current_user["id"]:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    if await has_contact_access(current_user, target):
+        raise HTTPException(status_code=400, detail="You already have access to this contact")
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    origin = _origin(request, body)
+    session = await _stripe_checkout(
+        request, origin, CONTACT_UNLOCK_PRICE,
+        f"{origin}/profile/{target_id}?unlock_session_id={{CHECKOUT_SESSION_ID}}", f"{origin}/profile/{target_id}",
+        {"user_id": current_user["id"], "type": "contact_unlock", "target_id": target_id})
+    await db.payment_transactions.insert_one({
+        "id": str(uuid.uuid4()), "user_id": current_user["id"], "session_id": session.session_id,
+        "amount": CONTACT_UNLOCK_PRICE, "currency": "usd", "plan": "contact_unlock", "target_id": target_id,
+        "payment_method": "stripe", "payment_status": "pending", "created_at": now_str()})
+    return {"url": session.url, "session_id": session.session_id, "amount": CONTACT_UNLOCK_PRICE}
+
+
+@router.get("/contact-unlock/status/{session_id}")
+async def contact_unlock_status(session_id: str, request: Request, current_user: dict = Depends(get_current_user)):
+    tx = await get_owned_tx(session_id, current_user)
+    if not tx or tx.get("plan") != "contact_unlock":
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if tx.get("payment_status") != "paid":
+        stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url="")
+        status = await stripe.get_checkout_status(session_id)
+        if status.payment_status != "paid":
+            return {"payment_status": status.payment_status}
+        tx = await db.payment_transactions.find_one_and_update(
+            {"session_id": session_id, "payment_status": {"$ne": "paid"}},
+            {"$set": {"payment_status": "paid", "updated_at": now_str()}}) or tx
+        await db.contact_unlocks.update_one(
+            {"buyer_id": tx["user_id"], "target_id": tx["target_id"]},
+            {"$setOnInsert": {"buyer_id": tx["user_id"], "target_id": tx["target_id"], "session_id": session_id, "paid_at": now_str()}},
+            upsert=True)
+    return {"payment_status": "paid", "target_id": tx["target_id"]}
+
+
+# ─── Guest Job Post ($9.99, no account) ──────────────────────────────────────
+
+from pydantic import BaseModel, Field, EmailStr  # noqa: E402
+from auth import limiter  # noqa: E402
+
+
+class GuestJobRequest(BaseModel):
+    title: str = Field(..., min_length=3, max_length=120)
+    description: str = Field(..., min_length=20, max_length=4000)
+    trade: str = Field(..., min_length=1, max_length=60)
+    crew_needed: int = Field(..., ge=1, le=20)
+    start_time: str = Field(..., min_length=8, max_length=40)
+    end_time: str | None = Field(None, max_length=40)
+    pay_rate: float = Field(..., gt=0, le=1000)
+    address: str = Field(..., min_length=5, max_length=300)
+    lat: float | None = None
+    lng: float | None = None
+    city: str | None = Field(None, max_length=100)
+    state: str | None = Field(None, max_length=60)
+    poster_name: str = Field(..., min_length=2, max_length=100)
+    poster_email: EmailStr
+    poster_phone: str = Field(..., min_length=7, max_length=30)
+    origin_url: str | None = None
+
+
+@router.post("/guest-job/checkout")
+@limiter.limit("5/minute")
+async def guest_job_checkout(data: GuestJobRequest, request: Request):
+    from utils.geocoding import valid_coords, geocode_address
+    coords = valid_coords(data.lat, data.lng)
+    location = ({"address": data.address, "lat": coords[0], "lng": coords[1], "city": data.city or "", "state": data.state or ""}
+                if coords else await geocode_address(data.address))
+    if not location:
+        raise HTTPException(status_code=400, detail="We couldn't locate that address. Please pick a suggested address.")
+    guest_id = str(uuid.uuid4())
+    origin = _origin(request, {"origin_url": data.origin_url})
+    session = await _stripe_checkout(
+        request, origin, GUEST_JOB_PRICE, f"{origin}/post-job?guest_session_id={{CHECKOUT_SESSION_ID}}", f"{origin}/post-job",
+        {"type": "guest_job", "guest_job_id": guest_id})
+    await db.guest_jobs.insert_one({
+        "id": guest_id, "status": "pending_payment", "session_id": session.session_id,
+        "job": data.model_dump(exclude={"origin_url", "poster_name", "poster_email", "poster_phone", "lat", "lng", "city", "state"}),
+        "location": location,
+        "contact": {"name": data.poster_name, "email": data.poster_email, "phone": data.poster_phone},
+        "created_at": now_str()})
+    await db.payment_transactions.insert_one({
+        "id": str(uuid.uuid4()), "user_id": None, "guest_job_id": guest_id, "session_id": session.session_id,
+        "amount": GUEST_JOB_PRICE, "currency": "usd", "plan": "guest_job", "payment_method": "stripe",
+        "payment_status": "pending", "created_at": now_str()})
+    return {"url": session.url, "session_id": session.session_id, "amount": GUEST_JOB_PRICE}
+
+
+@router.get("/guest-job/status/{session_id}")
+@limiter.limit("30/minute")
+async def guest_job_status(session_id: str, request: Request):
+    guest = await db.guest_jobs.find_one({"session_id": session_id}, {"_id": 0})
+    if not guest:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if guest["status"] == "published":
+        return {"payment_status": "paid", "published": True, "job_id": guest["job_id"]}
+    stripe = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url="")
+    status = await stripe.get_checkout_status(session_id)
+    if status.payment_status != "paid" or status.metadata.get("guest_job_id") != guest["id"]:
+        return {"payment_status": status.payment_status, "published": False}
+    job_id = str(uuid.uuid4())
+    claimed = await db.guest_jobs.find_one_and_update(
+        {"id": guest["id"], "status": "pending_payment"}, {"$set": {"status": "published", "job_id": job_id, "paid_at": now_str()}})
+    if claimed:
+        await db.payment_transactions.update_one({"session_id": session_id}, {"$set": {"payment_status": "paid", "updated_at": now_str()}})
+        job = guest["job"]
+        job_doc = {
+            "id": job_id, "contractor_id": f"guest:{guest['id']}", "contractor_name": guest["contact"]["name"],
+            "contractor_photo": None, "is_guest_post": True, "guest_job_id": guest["id"],
+            "title": job["title"], "description": job["description"], "trade": job["trade"],
+            "crew_needed": job["crew_needed"], "crew_accepted": [], "start_time": job["start_time"],
+            "end_time": job.get("end_time"), "pay_rate": job["pay_rate"], "location": guest["location"],
+            "status": "open", "is_emergency": False, "created_at": now_str(), "completed_at": None,
+            "rated_crew": [], "rated_by_crew": [], "invited_crew": [], "images": [],
+        }
+        await db.jobs.insert_one(job_doc)
+        try:
+            from routes.ws_routes import manager
+            await manager.broadcast_new_job({k: v for k, v in job_doc.items() if k != "_id"})
+        except Exception:
+            pass
+    return {"payment_status": "paid", "published": True, "job_id": job_id if claimed else (await db.guest_jobs.find_one({"id": guest["id"]}))["job_id"]}

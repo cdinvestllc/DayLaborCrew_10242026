@@ -239,14 +239,16 @@ export default function LandingPage() {
                   <Link to="/auth?mode=register&role=crew" className="block text-slate-400 hover:text-white transition-colors">Find Work</Link>
                   <Link to="/auth?mode=register&role=contractor" className="block text-slate-400 hover:text-white transition-colors">Hire Crew</Link>
                   <Link to="/auth?mode=login" className="block text-slate-400 hover:text-white transition-colors">Log In</Link>
+                  <Link to="/post-job" className="block text-slate-400 hover:text-white transition-colors" data-testid="footer-guest-post">Post a Job – No Account ($9.99)</Link>
                 </div>
               </div>
               <div>
                 <h4 className="text-white font-semibold mb-3">Legal</h4>
                 <div className="space-y-2">
-                  <Link to="/terms" className="block text-slate-400 hover:text-white transition-colors" data-testid="footer-terms">Terms & Conditions</Link>
+                  <Link to="/legal?page=terms" className="block text-slate-400 hover:text-white transition-colors" data-testid="footer-terms">Terms & Conditions</Link>
                   <Link to="/auth?advertiser=true" className="block text-slate-400 hover:text-white transition-colors" data-testid="footer-advertiser">Advertiser Signup</Link>
-                  <Link to="/privacy" className="block text-slate-400 hover:text-white transition-colors">Privacy Policy</Link>
+                  <Link to="/legal?page=privacy" className="block text-slate-400 hover:text-white transition-colors" data-testid="footer-privacy">Privacy Policy</Link>
+                  <Link to="/legal?page=guidelines" className="block text-slate-400 hover:text-white transition-colors" data-testid="footer-guidelines">Community Guidelines</Link>
                 </div>
               </div>
             </div>

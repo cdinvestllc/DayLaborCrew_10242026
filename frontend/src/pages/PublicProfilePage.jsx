@@ -1,10 +1,15 @@
 import React, { useEffect, useState } from "react";
-import { useParams, Link, useNavigate } from "react-router-dom";
+import { useParams, Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import Navbar from "../components/Navbar";
 import axios from "axios";
-import { Star, MapPin, Briefcase, Copy, Check, ArrowLeft, Send, Shield } from "lucide-react";
+import { Star, MapPin, Briefcase, Copy, Check, ArrowLeft, Send, Shield, Lock, Truck } from "lucide-react";
+import OfferCrewModal from "../components/OfferCrewModal";
+import { CertificationsList } from "../components/Certifications";
+import TrustCard from "../components/TrustCard";
 import { toast } from "sonner";
+import SafeImage from "../components/SafeImage";
+import { resolveImageUrl } from "../lib/media";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -15,20 +20,54 @@ export default function PublicProfilePage() {
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
-  const [jobs, setJobs] = useState([]);
+  const [showOffer, setShowOffer] = useState(false);
+  const [unlocking, setUnlocking] = useState(false);
+  const [searchParams, setSearchParams] = useSearchParams();
 
+  const load = async () => {
+    try {
+      const res = await axios.get(`${API}/users/public/${userId}`);
+      setProfile(res.data);
+    } catch (e) {
+      if (e?.response?.status === 404) toast.error("Profile not found");
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); }, [userId, user?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Returning from the $2.99 contact-unlock checkout: confirm payment server-side, then reload
   useEffect(() => {
-    const load = async () => {
+    const sessionId = searchParams.get("unlock_session_id");
+    if (!sessionId || !user) return;
+    let tries = 0;
+    const poll = async () => {
       try {
-        const res = await axios.get(`${API}/users/public/${userId}?viewer_id=${user?.id || ""}`);
-        setProfile(res.data);
-      } catch (e) {
-        if (e?.response?.status === 404) toast.error("Profile not found");
-      }
-      setLoading(false);
+        const res = await axios.get(`${API}/payments/contact-unlock/status/${sessionId}`);
+        if (res.data.payment_status === "paid") {
+          toast.success("Contact unlocked");
+          setSearchParams({});
+          load();
+          return;
+        }
+      } catch { }
+      if (++tries < 6) setTimeout(poll, 2000);
+      else toast.error("Payment not confirmed yet. Refresh in a moment.");
     };
-    load();
-  }, [userId, user?.id]);
+    poll();
+  }, [user?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const unlockContact = async () => {
+    if (!user) { navigate("/auth?mode=login"); return; }
+    setUnlocking(true);
+    try {
+      const res = await axios.post(`${API}/payments/contact-unlock/${userId}`, { origin_url: window.location.origin });
+      window.location.href = res.data.url;
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Couldn't start checkout");
+      setUnlocking(false);
+    }
+  };
 
   const copyProfileLink = () => {
     navigator.clipboard.writeText(window.location.href);
@@ -42,7 +81,7 @@ export default function PublicProfilePage() {
       navigate("/auth?mode=login");
       return;
     }
-    navigate(`/contractor/dashboard?offer=${userId}`);
+    setShowOffer(true);
   };
 
   if (loading) {
@@ -91,7 +130,7 @@ export default function PublicProfilePage() {
           <div className="flex items-start gap-5">
             <div className="w-20 h-20 rounded-2xl overflow-hidden bg-[#050A30] flex items-center justify-center text-white text-2xl font-extrabold flex-shrink-0">
               {photoUrl
-                ? <img src={`${process.env.REACT_APP_BACKEND_URL}${photoUrl}`} alt={displayName} className="w-full h-full object-cover" />
+                ? <SafeImage src={resolveImageUrl(photoUrl)} alt={displayName} className="w-full h-full object-cover" />
                 : initials}
             </div>
             <div className="flex-1 min-w-0">
@@ -121,6 +160,11 @@ export default function PublicProfilePage() {
               </div>
 
               <div className="flex flex-wrap gap-4 mt-3 text-sm">
+                {profile.transportation && user?.role === "contractor" && (
+                  <span className="flex items-center gap-1 text-slate-600 dark:text-slate-300 capitalize" data-testid="profile-transportation">
+                    <Truck className="w-4 h-4" /> {profile.transportation}
+                  </span>
+                )}
                 {profile.rating > 0 && (
                   <span className="flex items-center gap-1 text-amber-500 font-semibold">
                     <Star className="w-4 h-4 fill-current" /> {profile.rating.toFixed(1)}
@@ -149,13 +193,19 @@ export default function PublicProfilePage() {
           )}
         </div>
 
+        <TrustCard reputation={profile.reputation} />
+
+        {profile.certifications?.length > 0 && (
+          <div className="card p-5 mb-4"><CertificationsList items={profile.certifications} /></div>
+        )}
+
         {/* Skills */}
         {profile.skills?.length > 0 && (
           <div className="card p-5 mb-4">
             <h3 className="font-bold text-[#050A30] dark:text-white mb-3" style={{ fontFamily: "Manrope, sans-serif" }}>Skills</h3>
             <div className="flex flex-wrap gap-2">
               {profile.skills.map(s => (
-                <span key={s} className="bg-blue-50 dark:bg-blue-950 text-[#0000FF] px-3 py-1 rounded-full text-xs font-semibold">
+                <span key={s} className="bg-blue-50 dark:bg-blue-950 text-[#0000FF] dark:text-[#7EC8E3] px-3 py-1 rounded-full text-xs font-semibold">
                   {s}
                 </span>
               ))}
@@ -171,9 +221,9 @@ export default function PublicProfilePage() {
             </h3>
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
               {profile.portfolio.map((url, i) => (
-                <a key={i} href={`${process.env.REACT_APP_BACKEND_URL}${url}`} target="_blank" rel="noreferrer"
+                <a key={i} href={resolveImageUrl(url)} target="_blank" rel="noreferrer"
                   className="aspect-square rounded-xl overflow-hidden bg-slate-100 dark:bg-slate-800 hover:opacity-90 transition-opacity">
-                  <img src={`${process.env.REACT_APP_BACKEND_URL}${url}`} alt={`Work ${i + 1}`}
+                  <SafeImage src={resolveImageUrl(url)} alt={`Work ${i + 1}`}
                     className="w-full h-full object-cover" />
                 </a>
               ))}
@@ -181,16 +231,33 @@ export default function PublicProfilePage() {
           </div>
         )}
 
-        {/* Contact info (if not hidden) */}
-        {(profile.phone || profile.email) && (
-          <div className="card p-5">
+        {/* Contact: released only after hiring or a paid unlock (enforced by the API) */}
+        {!isOwn && (
+          <div className="card p-5" data-testid="profile-contact-card">
             <h3 className="font-bold text-[#050A30] dark:text-white mb-3" style={{ fontFamily: "Manrope, sans-serif" }}>Contact</h3>
-            <div className="space-y-2">
-              {profile.phone && <p className="text-sm text-slate-600 dark:text-slate-300">Phone: <strong>{profile.phone}</strong></p>}
-              {profile.email && <p className="text-sm text-slate-600 dark:text-slate-300">Email: <strong>{profile.email}</strong></p>}
-            </div>
+            {profile.contact_access ? (
+              <div className="space-y-2">
+                {profile.phone && <p className="text-sm text-slate-600 dark:text-slate-300">Phone: <strong data-testid="profile-phone">{profile.phone}</strong></p>}
+                {profile.email && <p className="text-sm text-slate-600 dark:text-slate-300">Email: <strong data-testid="profile-email">{profile.email}</strong></p>}
+                {!profile.phone && !profile.email && <p className="text-sm text-slate-500 dark:text-slate-400">This member keeps their contact details private. Use in-app messages.</p>}
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {profile.phone_masked && <p className="text-sm text-slate-600 dark:text-slate-300">Phone: <strong>{profile.phone_masked}</strong></p>}
+                {profile.email_masked && <p className="text-sm text-slate-600 dark:text-slate-300">Email: <strong>{profile.email_masked}</strong></p>}
+                <p className="text-xs text-slate-500 dark:text-slate-400 flex items-center gap-1"><Lock className="w-3.5 h-3.5" /> Shared automatically once you work a job together.</p>
+                {(profile.phone_masked || profile.email_masked) && (
+                  <button onClick={unlockContact} disabled={unlocking}
+                    className="mt-1 inline-flex items-center gap-2 bg-[#0000FF] text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-blue-700 disabled:opacity-60"
+                    data-testid="unlock-contact-btn">
+                    <Lock className="w-4 h-4" /> {unlocking ? "Opening checkout..." : "Unlock contact – $2.99"}
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         )}
+        {showOffer && <OfferCrewModal crew={profile} onClose={() => setShowOffer(false)} />}
       </div>
     </div>
   );

@@ -8,6 +8,9 @@ from models import ProfileUpdate, LocationUpdate
 from typing import Optional
 from datetime import datetime, timezone
 import logging
+from auth import limiter
+from utils.geocoding import valid_coords, distance_between, autocomplete_address
+from utils.profile_view import build_user_view, user_coords
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -22,14 +25,31 @@ async def get_me(current_user: dict = Depends(get_current_user)):
 @router.put("/profile")
 async def update_profile(data: ProfileUpdate, current_user: dict = Depends(get_current_user)):
     update = {k: v for k, v in data.model_dump().items() if v is not None}
-    # If address+lat+lng provided, also update location object
-    if data.lat and data.lng:
+    update.pop("location", None)
+    if data.transportation is not None and data.transportation not in ("bike", "car", "suv_van", "truck", "bus", "rideshare", "other", ""):
+        raise HTTPException(status_code=400, detail="Invalid transportation type")
+    if data.portfolio is not None:
+        own_prefix = f"/api/public/files/thedaylaborers/portfolio/{current_user['id']}/"
+        current = set(current_user.get("portfolio") or [])
+        if len(data.portfolio) > 8 or any(u not in current and not u.startswith(own_prefix) for u in data.portfolio):
+            raise HTTPException(status_code=400, detail="Portfolio may only contain up to 8 of your uploaded images")
+    if data.certifications is not None:
+        update["certifications"] = [c.model_dump() for c in data.certifications]
+    if data.lat is not None or data.lng is not None:
+        coords = valid_coords(data.lat, data.lng)
+        if not coords:
+            raise HTTPException(status_code=400, detail="Invalid latitude/longitude")
+        prev = current_user.get("location") if isinstance(current_user.get("location"), dict) else {}
         update["location"] = {
-            **(update.get("location") or current_user.get("location") or {}),
-            "lat": data.lat,
-            "lng": data.lng,
+            **prev,
+            "lat": coords[0],
+            "lng": coords[1],
             "address": data.address or "",
+            "city": data.city if data.city is not None else prev.get("city", ""),
+            "state": data.state if data.state is not None else prev.get("state", ""),
         }
+    update.pop("city", None)
+    update.pop("state", None)
     if update:
         await db.users.update_one({"id": current_user["id"]}, {"$set": update})
     updated = await db.users.find_one({"id": current_user["id"]}, {"_id": 0})
@@ -38,7 +58,10 @@ async def update_profile(data: ProfileUpdate, current_user: dict = Depends(get_c
 
 @router.post("/location")
 async def update_location(data: LocationUpdate, current_user: dict = Depends(get_current_user)):
-    location = {"lat": data.lat, "lng": data.lng, "city": data.city or ""}
+    if not valid_coords(data.lat, data.lng):
+        raise HTTPException(status_code=400, detail="Invalid latitude/longitude")
+    prev = current_user.get("location") if isinstance(current_user.get("location"), dict) else {}
+    location = {**prev, "lat": data.lat, "lng": data.lng, "city": data.city or prev.get("city", "")}
     await db.users.update_one(
         {"id": current_user["id"]},
         {"$set": {"location": location}}
@@ -74,6 +97,24 @@ async def upload_portfolio(files: list[UploadFile] = File(...), current_user: di
     return {"urls": urls, "portfolio": updated}
 
 
+@router.post("/upload-job-images")
+async def upload_job_images(files: list[UploadFile] = File(...), current_user: dict = Depends(get_current_user)):
+    """Contractors attach up to 6 photos to a job before publishing."""
+    if current_user["role"] != "contractor":
+        raise HTTPException(status_code=403, detail="Only contractors can attach job images")
+    if len(files) > 6:
+        raise HTTPException(status_code=400, detail="Maximum 6 job images")
+    return {"urls": [await save_image(f, current_user["id"], "job_images") for f in files]}
+
+
+@router.get("/geocode/search")
+@limiter.limit("30/minute")
+async def geocode_search(request: Request, q: str = Query(..., min_length=3, max_length=200),
+                         current_user: dict = Depends(get_current_user)):
+    """Address autocomplete through the server-side geocoder (no client keys)."""
+    return await autocomplete_address(q)
+
+
 @router.get("/crew")
 async def search_crew(
     trade: Optional[str] = None,
@@ -84,36 +125,42 @@ async def search_crew(
     available_only: bool = True,
     current_user: dict = Depends(get_current_user)
 ):
+    import re
     query = {"role": "crew", "is_active": True}
     if trade:
-        query["trade"] = {"$regex": trade, "$options": "i"}
+        query["trade"] = {"$regex": re.escape(trade), "$options": "i"}
     if name:
-        query["name"] = {"$regex": name, "$options": "i"}
+        query["name"] = {"$regex": re.escape(name), "$options": "i"}
     if available_only:
         query["availability"] = True
 
-    crew = await db.users.find(query, {"_id": 0, "password_hash": 0}).to_list(100)
+    crew = await db.users.find(query, {"_id": 0, "password_hash": 0}).to_list(200)
 
-    if lat and lng:
-        from utils.geocoding import haversine_distance
-        crew = [c for c in crew if c.get("location") and
-                haversine_distance(lat, lng, c["location"]["lat"], c["location"]["lng"]) <= radius]
-
-    return crew
+    origin = valid_coords(lat, lng)
+    radius = min(max(radius or 50, 1), 250)
+    results = []
+    for c in crew:
+        dist = distance_between(origin, user_coords(c))
+        if origin and (dist is None or dist > radius):
+            continue
+        view = await build_user_view(c, current_user, include_coords=True)
+        view["distance_miles"] = round(dist, 1) if dist is not None else None
+        results.append(view)
+    return results
 
 
 @router.get("/crew/{user_id}")
 async def get_crew_member(user_id: str, current_user: dict = Depends(get_current_user)):
-    user = await db.users.find_one({"id": user_id, "role": "crew"}, {"_id": 0, "password_hash": 0})
+    user = await db.users.find_one({"id": user_id, "role": "crew", "is_active": True}, {"_id": 0, "password_hash": 0})
     if not user:
         raise HTTPException(status_code=404, detail="Crew member not found")
-    ratings = await db.ratings.find({"rated_id": user_id}, {"_id": 0}).to_list(50)
-    return {**user_to_response(user), "recent_ratings": ratings[-5:]}
+    ratings = await db.ratings.find({"rated_id": user_id, "hidden": {"$ne": True}}, {"_id": 0}).sort("created_at", -1).to_list(5)
+    return {**await build_user_view(user, current_user, include_coords=True), "recent_ratings": ratings}
 
 
 @router.post("/favorites/{user_id}")
 async def add_favorite(user_id: str, current_user: dict = Depends(get_current_user)):
-    target = await db.users.find_one({"id": user_id})
+    target = await db.users.find_one({"id": user_id, "role": "crew"})
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
     if user_id not in current_user.get("favorite_crew", []):
@@ -136,8 +183,8 @@ async def remove_favorite(user_id: str, current_user: dict = Depends(get_current
 @router.get("/favorites")
 async def get_favorites(current_user: dict = Depends(get_current_user)):
     fav_ids = current_user.get("favorite_crew", [])
-    users = await db.users.find({"id": {"$in": fav_ids}}, {"_id": 0, "password_hash": 0}).to_list(100)
-    return users
+    users = await db.users.find({"id": {"$in": fav_ids}, "is_active": True}, {"_id": 0, "password_hash": 0}).to_list(100)
+    return [await build_user_view(u, current_user, include_coords=True) for u in users]
 
 
 @router.get("/referral/info")
@@ -331,38 +378,12 @@ async def get_public_profile(user_id: str, viewer: Optional[dict] = Depends(get_
     if not user or not user.get("is_active"):
         raise HTTPException(status_code=404, detail="Profile not found")
 
-    privacy = user.get("privacy", {})
-    is_own = bool(viewer) and viewer["id"] == user_id
-
-    profile = {
-        "id": user["id"],
-        "name": user["name"],
-        "role": user["role"],
-        "bio": user.get("bio", ""),
-        "trade": user.get("trade", ""),
-        "skills": user.get("skills", []),
-        "rating": user.get("rating", 0),
-        "rating_count": user.get("rating_count", 0),
-        "jobs_completed": user.get("jobs_completed", 0),
-        "availability": user.get("availability", False),
-        "portfolio": user.get("portfolio", []),
-        "company_name": user.get("company_name", ""),
-        "created_at": user.get("created_at"),
-    }
-
-    # Apply privacy controls
-    if is_own or not privacy.get("hide_phone"):
-        profile["phone"] = user.get("phone")
-    if is_own or not privacy.get("hide_email"):
-        profile["email"] = user.get("email")
-    if is_own or not privacy.get("hide_location"):
-        profile["location"] = user.get("location")
-        profile["address"] = user.get("address")
-
-    # Include photo
-    profile["profile_photo"] = user.get("profile_photo")
-    profile["logo"] = user.get("logo")
-    return profile
+    from utils.profile_view import reputation
+    view = await build_user_view(user, viewer, include_coords=False)
+    view["reputation"] = await reputation(user)
+    view["recent_ratings"] = await db.ratings.find({"rated_id": user_id, "hidden": {"$ne": True}},
+                                                   {"_id": 0, "stars": 1, "review": 1, "created_at": 1}).sort("created_at", -1).to_list(5)
+    return view
 
 
 # ─── Update privacy settings ─────────────────────────────────────────────────

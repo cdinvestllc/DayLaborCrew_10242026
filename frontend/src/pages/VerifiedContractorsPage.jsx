@@ -1,8 +1,11 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { MapPin, List, Map as MapIcon, Search, Shield, Star, CheckCircle, X } from "lucide-react";
 import Navbar from "../components/Navbar";
 import { US_STATES } from "../lib/usStates";
+import { toLngLat } from "../lib/media";
+import SafeImage from "../components/SafeImage";
+import { resolveImageUrl } from "../lib/media";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -24,7 +27,7 @@ function ContractorCard({ c, onClick, selected }) {
       <div className="flex items-start gap-3">
         <div className="w-12 h-12 rounded-xl bg-[#050A30] flex items-center justify-center text-white font-bold text-sm flex-shrink-0">
           {c.logo || c.profile_photo
-            ? <img src={`${process.env.REACT_APP_BACKEND_URL}${c.logo || c.profile_photo}`} alt={name} className="w-full h-full object-cover rounded-xl" />
+            ? <SafeImage src={resolveImageUrl(c.logo || c.profile_photo)} alt={name} className="w-full h-full object-cover rounded-xl" />
             : initials}
         </div>
         <div className="flex-1 min-w-0">
@@ -67,7 +70,7 @@ function ContractorSidebar({ contractor, onClose }) {
         <div className="flex items-center gap-4 mb-4">
           <div className="w-16 h-16 rounded-2xl bg-[#050A30] flex items-center justify-center text-white font-bold text-xl flex-shrink-0">
             {contractor.logo || contractor.profile_photo
-              ? <img src={`${process.env.REACT_APP_BACKEND_URL}${contractor.logo || contractor.profile_photo}`} alt={name} className="w-full h-full object-cover rounded-2xl" />
+              ? <SafeImage src={resolveImageUrl(contractor.logo || contractor.profile_photo)} alt={name} className="w-full h-full object-cover rounded-2xl" />
               : initials}
           </div>
           <div>
@@ -118,8 +121,8 @@ function ContractorSidebar({ contractor, onClose }) {
             <p className="font-semibold text-[#050A30] dark:text-white text-sm mb-2">Portfolio</p>
             <div className="grid grid-cols-3 gap-1.5">
               {contractor.portfolio.slice(0, 6).map((url, i) => (
-                <a key={i} href={`${process.env.REACT_APP_BACKEND_URL}${url}`} target="_blank" rel="noreferrer">
-                  <img src={`${process.env.REACT_APP_BACKEND_URL}${url}`} alt={`Work ${i + 1}`} className="aspect-square w-full object-cover rounded-lg" />
+                <a key={i} href={resolveImageUrl(url)} target="_blank" rel="noreferrer">
+                  <SafeImage src={resolveImageUrl(url)} alt={`Work ${i + 1}`} className="aspect-square w-full object-cover rounded-lg" />
                 </a>
               ))}
             </div>
@@ -140,161 +143,63 @@ function MapView({ contractors, onSelect, selected }) {
   const mapRef = useRef(null);
   const mapInstance = useRef(null);
   const markersRef = useRef([]);
+  const libRef = useRef(null);
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    if (!mapRef.current) return;
     let cancelled = false;
-
-    const init = async () => {
+    (async () => {
       const maplibregl = (await import("maplibre-gl")).default;
       await import("maplibre-gl/dist/maplibre-gl.css");
-      if (cancelled || mapInstance.current) return;
-
+      if (cancelled || !mapRef.current || mapInstance.current) return;
+      libRef.current = maplibregl;
       const map = new maplibregl.Map({
         container: mapRef.current,
         style: {
           version: 8,
-          sources: {
-            osm: {
-              type: "raster",
-              tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
-              tileSize: 256,
-              attribution: "© OpenStreetMap contributors"
-            }
-          },
-          layers: [{ id: "osm", type: "raster", source: "osm" }]
+          sources: { osm: { type: "raster", tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"], tileSize: 256,
+            attribution: "© <a href='https://www.openstreetmap.org/copyright' target='_blank'>OpenStreetMap</a> contributors" } },
+          layers: [{ id: "osm", type: "raster", source: "osm" }],
         },
         center: [-98.5795, 39.8283],
-        zoom: 4
+        zoom: 3.5,
+        maxBounds: [[-180, -85], [180, 85]],
       });
-
+      map.addControl(new maplibregl.NavigationControl(), "top-right");
+      map.addControl(new maplibregl.GeolocateControl({ positionOptions: { enableHighAccuracy: true } }), "top-right");
+      map.on("load", () => { map.resize(); setReady(true); });
       mapInstance.current = map;
-
-      // Try geolocation
-      if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition(
-          (pos) => { if (mapInstance.current) mapInstance.current.setCenter([pos.coords.longitude, pos.coords.latitude]).setZoom(8); },
-          () => {}
-        );
-      }
-    };
-
-    init().catch(() => {});
-    return () => { cancelled = true; if (mapInstance.current) { mapInstance.current.remove(); mapInstance.current = null; } };
-  }, []);
-
-  // Add/update markers with clustering support
-  useEffect(() => {
-    if (!mapInstance.current) return;
-    const initMarkers = async () => {
-      const maplibregl = (await import("maplibre-gl")).default;
+    })().catch(err => console.error("Map failed to initialise", err));
+    return () => {
+      cancelled = true;
       markersRef.current.forEach(m => m.remove());
       markersRef.current = [];
-
-      const map = mapInstance.current;
-
-      // Remove old cluster layers/source
-      ["clusters", "cluster-count", "unclustered-point"].forEach(id => {
-        if (map.getLayer(id)) map.removeLayer(id);
-      });
-      if (map.getSource("contractors")) map.removeSource("contractors");
-
-      // Build GeoJSON for contractors with location
-      const features = contractors
-        .filter(c => c.location?.lat && c.location?.lng)
-        .map(c => ({
-          type: "Feature",
-          properties: { id: c.id, name: c.company_name || c.name, selected: selected?.id === c.id },
-          geometry: { type: "Point", coordinates: [c.location.lng, c.location.lat] }
-        }));
-
-      if (features.length === 0) return;
-
-      // Add GeoJSON source with cluster
-      map.addSource("contractors", {
-        type: "geojson",
-        data: { type: "FeatureCollection", features },
-        cluster: true,
-        clusterMaxZoom: 10,
-        clusterRadius: 50
-      });
-
-      // Cluster circle layer
-      map.addLayer({
-        id: "clusters",
-        type: "circle",
-        source: "contractors",
-        filter: ["has", "point_count"],
-        paint: {
-          "circle-color": "#0000FF",
-          "circle-radius": ["step", ["get", "point_count"], 20, 5, 28, 20, 36],
-          "circle-stroke-width": 3,
-          "circle-stroke-color": "#fff"
-        }
-      });
-
-      // Cluster count label
-      map.addLayer({
-        id: "cluster-count",
-        type: "symbol",
-        source: "contractors",
-        filter: ["has", "point_count"],
-        layout: { "text-field": "{point_count_abbreviated}", "text-size": 12, "text-font": ["Open Sans Bold", "Arial Unicode MS Bold"] },
-        paint: { "text-color": "#fff" }
-      });
-
-      // Individual contractor points
-      map.addLayer({
-        id: "unclustered-point",
-        type: "circle",
-        source: "contractors",
-        filter: ["!", ["has", "point_count"]],
-        paint: {
-          "circle-color": ["case", ["==", ["get", "id"], selected?.id || ""], "#7EC8E3", "#050A30"],
-          "circle-radius": 10,
-          "circle-stroke-width": 3,
-          "circle-stroke-color": "#0000FF"
-        }
-      });
-
-      // Click cluster → zoom in
-      map.on("click", "clusters", (e) => {
-        const features = map.queryRenderedFeatures(e.point, { layers: ["clusters"] });
-        const clusterId = features[0]?.properties?.cluster_id;
-        if (!clusterId) return;
-        map.getSource("contractors").getClusterExpansionZoom(clusterId, (err, zoom) => {
-          if (err) return;
-          map.easeTo({ center: features[0].geometry.coordinates, zoom });
-        });
-      });
-
-      // Click individual point → show contractor
-      map.on("click", "unclustered-point", (e) => {
-        const id = e.features[0]?.properties?.id;
-        const c = contractors.find(x => x.id === id);
-        if (c) onSelect(c);
-      });
-
-      map.getCanvas().style.cursor = "pointer";
-
-      // Also add name labels for unclustered points
-      contractors.filter(c => c.location?.lat && c.location?.lng).forEach(c => {
-        const el = document.createElement("div");
-        el.style.cssText = `background:${selected?.id === c.id ? "#0000FF" : "#050A30"};color:white;padding:3px 8px;border-radius:12px;font-size:10px;font-weight:700;white-space:nowrap;border:1.5px solid ${selected?.id === c.id ? "#7EC8E3" : "#0000FF"};box-shadow:0 2px 6px rgba(0,0,0,0.3);margin-top:-32px;cursor:pointer`;
-        el.textContent = c.company_name || c.name;
-        el.addEventListener("click", () => onSelect(c));
-        const marker = new maplibregl.Marker({ element: el }).setLngLat([c.location.lng, c.location.lat]).addTo(map);
-        markersRef.current.push(marker);
-      });
+      if (mapInstance.current) { mapInstance.current.remove(); mapInstance.current = null; }
     };
+  }, []);
 
-    // Wait for map to be loaded before adding sources
-    if (mapInstance.current.loaded()) {
-      initMarkers().catch(() => {});
-    } else {
-      mapInstance.current.once("load", () => initMarkers().catch(() => {}));
-    }
-  }, [contractors, selected, onSelect]);
+  useEffect(() => {
+    const map = mapInstance.current;
+    const maplibregl = libRef.current;
+    if (!ready || !map || !maplibregl) return;
+    markersRef.current.forEach(m => m.remove());
+    markersRef.current = [];
+    const bounds = new maplibregl.LngLatBounds();
+    contractors.forEach(c => {
+      const lngLat = toLngLat(c.location);
+      if (!lngLat) return;
+      const isSel = selected?.id === c.id;
+      const label = document.createElement("button");
+      label.type = "button";
+      label.style.cssText = `background:${isSel ? "#0000FF" : "#050A30"};color:#fff;padding:4px 10px;border-radius:12px;font-size:11px;font-weight:700;white-space:nowrap;border:2px solid ${isSel ? "#7EC8E3" : "#0000FF"};box-shadow:0 2px 6px rgba(0,0,0,0.3);cursor:pointer`;
+      label.textContent = c.company_name || c.name;
+      label.setAttribute("data-testid", `verified-marker-${c.id}`);
+      label.addEventListener("click", () => onSelect(c));
+      markersRef.current.push(new maplibregl.Marker({ element: label }).setLngLat(lngLat).addTo(map));
+      bounds.extend(lngLat);
+    });
+    if (!bounds.isEmpty()) map.fitBounds(bounds, { padding: 60, maxZoom: 11, duration: 600 });
+  }, [ready, contractors, selected, onSelect]);
 
   return (
     <div ref={mapRef} className="w-full h-full min-h-[400px] rounded-xl overflow-hidden" data-testid="verified-map-view" />
@@ -309,6 +214,12 @@ export default function VerifiedContractorsPage() {
   const [selectedState, setSelectedState] = useState("All States");
   const [selectedTrade, setSelectedTrade] = useState("All Trades");
   const [selected, setSelected] = useState(null);
+  const [query, setQuery] = useState("");
+  const [debounced, setDebounced] = useState("");
+
+  useEffect(() => { const t = setTimeout(() => setDebounced(query.trim()), 350); return () => clearTimeout(t); }, [query]);
+
+  const onSelect = useCallback(c => setSelected(c), []);
 
   const load = async () => {
     setLoading(true);
@@ -316,6 +227,7 @@ export default function VerifiedContractorsPage() {
       const params = {};
       if (selectedState !== "All States") params.state = selectedState;
       if (selectedTrade !== "All Trades") params.trade = selectedTrade;
+      if (debounced) params.q = debounced;
       const [res, settings] = await Promise.all([
         axios.get(`${API}/public/verified-contractors`, { params }),
         axios.get(`${API}/public/verified-contractors/settings`)
@@ -326,7 +238,7 @@ export default function VerifiedContractorsPage() {
     setLoading(false);
   };
 
-  useEffect(() => { load(); }, [selectedState, selectedTrade]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, [selectedState, selectedTrade, debounced]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-[#020617]" style={{ fontFamily: "Inter, sans-serif" }}>
@@ -337,7 +249,7 @@ export default function VerifiedContractorsPage() {
         <div className="max-w-5xl mx-auto text-center">
           <div className="inline-flex items-center gap-2 bg-[#0000FF]/20 border border-[#0000FF]/40 rounded-full px-4 py-1.5 mb-4">
             <CheckCircle className="w-4 h-4 text-[#7EC8E3]" />
-            <span className="text-[#7EC8E3] text-sm font-medium">Background Verified Professionals</span>
+            <span className="text-[#7EC8E3] text-sm font-medium">Verified Professionals</span>
           </div>
           <h1 className="text-3xl sm:text-4xl lg:text-5xl font-extrabold text-white mb-3" style={{ fontFamily: "Manrope, sans-serif" }} data-testid="verified-page-header">
             {pageSettings.verified_page_header}
@@ -349,6 +261,12 @@ export default function VerifiedContractorsPage() {
       {/* Filters */}
       <div className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-700 sticky top-16 z-30">
         <div className="max-w-5xl mx-auto px-4 py-3 flex flex-wrap items-center gap-3">
+          <div className="relative flex-1 min-w-[180px]">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search name, trade or city"
+              className="w-full pl-9 pr-3 py-2 border border-slate-300 dark:border-slate-600 rounded-lg text-sm bg-white text-slate-900 placeholder:text-slate-400 dark:bg-slate-800 dark:text-white focus:outline-none focus:border-[#0000FF]"
+              data-testid="verified-search-input" />
+          </div>
           <select value={selectedState} onChange={e => setSelectedState(e.target.value)}
             className="border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#0000FF] dark:bg-slate-800 dark:text-white"
             data-testid="state-filter">
@@ -398,7 +316,7 @@ export default function VerifiedContractorsPage() {
           </div>
         ) : (
           <div className="h-[500px] rounded-xl overflow-hidden">
-            <MapView contractors={contractors} onSelect={setSelected} selected={selected} />
+            <MapView contractors={contractors} onSelect={onSelect} selected={selected} />
           </div>
         )}
       </div>

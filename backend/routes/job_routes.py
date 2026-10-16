@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from database import db
 from auth import get_current_user, user_to_response
 from models import JobCreate, JobUpdate, RatingCreate
-from utils.geocoding import geocode_address, haversine_distance
+from utils.geocoding import geocode_address, valid_coords, distance_between
 from utils.email_utils import send_job_completion_email
 from utils.ai_utils import generate_smart_job_matches
 from typing import Optional
@@ -22,9 +22,19 @@ router = APIRouter()
 async def create_job(data: JobCreate, current_user: dict = Depends(get_current_user)):
     if current_user["role"] != "contractor":
         raise HTTPException(status_code=403, detail="Only contractors can post jobs")
+    from routes.payment_routes import consume_job_post_credit
+    await consume_job_post_credit(current_user)
 
-    # Geocode the address
-    location = await geocode_address(data.address)
+    coords = valid_coords(data.lat, data.lng)
+    if coords:
+        location = {"address": data.address, "lat": coords[0], "lng": coords[1], "city": data.city or "", "state": data.state or ""}
+    else:
+        location = await geocode_address(data.address)
+    if not location:
+        from routes.payment_routes import refund_job_post_credit
+        await refund_job_post_credit(current_user)
+        raise HTTPException(status_code=400, detail="We couldn't locate that address. Please pick a suggested address.")
+    images = _validated_job_images(data.images, current_user["id"])
 
     job_doc = {
         "id": str(uuid.uuid4()),
@@ -46,6 +56,8 @@ async def create_job(data: JobCreate, current_user: dict = Depends(get_current_u
         "completed_at": None,
         "rated_crew": [],
         "rated_by_crew": [],
+        "invited_crew": [],
+        "images": images,
     }
 
     await db.jobs.insert_one(job_doc)
@@ -62,6 +74,14 @@ async def create_job(data: JobCreate, current_user: dict = Depends(get_current_u
     asyncio.create_task(_run_ai_match(job_doc))
 
     return {k: v for k, v in job_doc.items() if k != "_id"}
+
+
+def _validated_job_images(images, user_id: str) -> list:
+    images = images or []
+    prefix = f"/api/public/files/thedaylaborers/job_images/{user_id}/"
+    if len(images) > 6 or any(not isinstance(u, str) or not u.startswith(prefix) for u in images):
+        raise HTTPException(status_code=400, detail="Job images must be up to 6 of your uploaded images")
+    return images
 
 
 @router.get("/")
@@ -91,18 +111,15 @@ async def list_jobs(
 
     jobs = await db.jobs.find(query, {"_id": 0}).sort("created_at", -1).to_list(200)
 
-    # Filter by radius if location provided
-    if lat and lng:
-        jobs = [j for j in jobs if haversine_distance(
-            lat, lng, j["location"]["lat"], j["location"]["lng"]
-        ) <= radius]
+    # Filter by radius if location provided (jobs without valid coordinates are excluded)
+    origin = valid_coords(lat, lng)
+    if origin:
+        radius = min(max(radius or 25, 1), 250)
+        jobs = [j for j in jobs if (d := distance_between(origin, valid_coords((j.get("location") or {}).get("lat"), (j.get("location") or {}).get("lng")))) is not None and d <= radius]
 
     # AI smart matching for crew
     if smart_match and current_user["role"] == "crew" and jobs:
-        try:
-            jobs = await generate_smart_job_matches(jobs, current_user)
-        except Exception:
-            pass
+        jobs = await generate_smart_job_matches(jobs, current_user)
 
     return jobs
 
@@ -132,10 +149,18 @@ async def update_job(job_id: str, data: JobUpdate, current_user: dict = Depends(
     job = await db.jobs.find_one({"id": job_id})
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job["contractor_id"] != current_user["id"] and current_user["role"] != "admin":
+    if job["contractor_id"] != current_user["id"] and current_user["role"] not in ("admin", "super_admin"):
         raise HTTPException(status_code=403, detail="Not authorized")
+    if job["status"] not in ("open", "fulfilled", "suspended"):
+        raise HTTPException(status_code=400, detail=f"A {job['status']} job can no longer be edited")
 
     update = {k: v for k, v in data.model_dump().items() if v is not None}
+    update.pop("status", None)  # status changes only through workflow endpoints
+    if "crew_needed" in update:
+        if update["crew_needed"] < max(1, len(job.get("crew_accepted", []))):
+            raise HTTPException(status_code=400, detail="Crew needed cannot be less than crew already accepted")
+        if job["status"] in ("open", "fulfilled"):
+            update["status"] = "fulfilled" if len(job.get("crew_accepted", [])) >= update["crew_needed"] else "open"
     if update:
         await db.jobs.update_one({"id": job_id}, {"$set": update})
     return {"message": "Job updated"}
@@ -146,8 +171,10 @@ async def delete_job(job_id: str, current_user: dict = Depends(get_current_user)
     job = await db.jobs.find_one({"id": job_id})
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job["contractor_id"] != current_user["id"] and current_user["role"] != "admin":
+    if job["contractor_id"] != current_user["id"] and current_user["role"] not in ("admin", "super_admin"):
         raise HTTPException(status_code=403, detail="Not authorized")
+    if job.get("crew_accepted") and current_user["role"] not in ("admin", "super_admin"):
+        raise HTTPException(status_code=400, detail="Jobs with accepted crew must be cancelled, not deleted")
     await db.jobs.delete_one({"id": job_id})
     return {"message": "Job deleted"}
 
@@ -157,21 +184,30 @@ async def accept_job(job_id: str, current_user: dict = Depends(get_current_user)
     if current_user["role"] != "crew":
         raise HTTPException(status_code=403, detail="Only crew members can accept jobs")
 
+    from routes.payment_routes import require_active_subscription
+    require_active_subscription(current_user)
     job = await db.jobs.find_one({"id": job_id}, {"_id": 0})
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job["status"] not in ("open", "fulfilled"):
-        raise HTTPException(status_code=400, detail=f"Job is {job['status']}, cannot accept")
     if current_user["id"] in job["crew_accepted"]:
         raise HTTPException(status_code=400, detail="Already accepted this job")
+    if job["status"] != "open":
+        raise HTTPException(status_code=400, detail=f"Job is {job['status']}, cannot accept")
 
-    new_crew = job["crew_accepted"] + [current_user["id"]]
-    new_status = "fulfilled" if len(new_crew) >= job["crew_needed"] else "open"
-
-    await db.jobs.update_one(
-        {"id": job_id},
-        {"$set": {"crew_accepted": new_crew, "status": new_status}}
+    # Atomic: only succeeds while the job is open, not full, and the crew member isn't already on it
+    job = await db.jobs.find_one_and_update(
+        {"id": job_id, "status": "open", "crew_accepted": {"$ne": current_user["id"]},
+         "$expr": {"$lt": [{"$size": "$crew_accepted"}, "$crew_needed"]}},
+        {"$push": {"crew_accepted": current_user["id"]}, "$pull": {"invited_crew": current_user["id"]}},
+        return_document=True, projection={"_id": 0},
     )
+    if not job:
+        raise HTTPException(status_code=409, detail="This job is no longer accepting crew")
+    new_crew = job["crew_accepted"]
+    new_status = "open"
+    if len(new_crew) >= job["crew_needed"]:
+        await db.jobs.update_one({"id": job_id, "status": "open"}, {"$set": {"status": "fulfilled"}})
+        new_status = "fulfilled"
 
     # Notify contractor via WebSocket
     try:
@@ -201,12 +237,14 @@ async def start_job(job_id: str, current_user: dict = Depends(get_current_user))
     job = await db.jobs.find_one({"id": job_id}, {"_id": 0})
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job["contractor_id"] != current_user["id"] and current_user["id"] not in job.get("crew_accepted", []):
-        raise HTTPException(status_code=403, detail="Not authorized")
-    if job["status"] not in ("open", "fulfilled"):
+    if job["contractor_id"] != current_user["id"] and current_user.get("role") not in ("admin", "super_admin"):
+        raise HTTPException(status_code=403, detail="Only the contractor can start this job")
+    if not job.get("crew_accepted"):
+        raise HTTPException(status_code=400, detail="At least one crew member must accept before starting")
+    result = await db.jobs.update_one({"id": job_id, "status": {"$in": ["open", "fulfilled"]}},
+                                      {"$set": {"status": "in_progress", "started_at": now_str()}})
+    if result.modified_count == 0:
         raise HTTPException(status_code=400, detail="Job cannot be started in current status")
-
-    await db.jobs.update_one({"id": job_id}, {"$set": {"status": "in_progress"}})
     return {"message": "Job started"}
 
 
@@ -218,13 +256,10 @@ async def complete_job(job_id: str, current_user: dict = Depends(get_current_use
 
     if current_user["id"] not in job.get("crew_accepted", []):
         raise HTTPException(status_code=403, detail="Not a crew member on this job")
-    if job["status"] != "in_progress":
+    result = await db.jobs.update_one({"id": job_id, "status": "in_progress"},
+                                      {"$set": {"status": "completed_pending_review"}})
+    if result.modified_count == 0:
         raise HTTPException(status_code=400, detail="Job must be in_progress to complete")
-
-    await db.jobs.update_one(
-        {"id": job_id},
-        {"$set": {"status": "completed_pending_review"}}
-    )
 
     # Notify contractor
     contractor = await db.users.find_one({"id": job["contractor_id"]}, {"_id": 0})
@@ -256,14 +291,11 @@ async def verify_job(job_id: str, current_user: dict = Depends(get_current_user)
         raise HTTPException(status_code=404, detail="Job not found")
     if job["contractor_id"] != current_user["id"]:
         raise HTTPException(status_code=403, detail="Only the contractor can verify")
-    if job["status"] != "completed_pending_review":
-        raise HTTPException(status_code=400, detail="Job not pending review")
-
     now = now_str()
-    await db.jobs.update_one(
-        {"id": job_id},
-        {"$set": {"status": "completed", "completed_at": now}}
-    )
+    result = await db.jobs.update_one({"id": job_id, "status": "completed_pending_review"},
+                                      {"$set": {"status": "completed", "completed_at": now}})
+    if result.modified_count == 0:
+        raise HTTPException(status_code=400, detail="Job not pending review")
 
     # Award points to crew members
     for crew_id in job.get("crew_accepted", []):
@@ -280,14 +312,22 @@ async def rate_user(job_id: str, data: RatingCreate, current_user: dict = Depend
     job = await db.jobs.find_one({"id": job_id}, {"_id": 0})
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job["status"] not in ("completed", "completed_pending_review"):
-        raise HTTPException(status_code=400, detail="Can only rate after job completion")
+    if job["status"] != "completed":
+        raise HTTPException(status_code=400, detail="Can only rate after the contractor verifies completion")
 
-    # Verify rater was part of this job
+    # Contractor rates accepted crew; crew rate the contractor
     is_contractor = job["contractor_id"] == current_user["id"]
     is_crew = current_user["id"] in job.get("crew_accepted", [])
     if not (is_contractor or is_crew):
         raise HTTPException(status_code=403, detail="Not part of this job")
+    if data.rated_id == current_user["id"]:
+        raise HTTPException(status_code=400, detail="You cannot rate yourself")
+    if is_contractor and data.rated_id not in job.get("crew_accepted", []):
+        raise HTTPException(status_code=400, detail="You can only rate crew who worked this job")
+    if is_crew and data.rated_id != job["contractor_id"]:
+        raise HTTPException(status_code=400, detail="Crew can only rate the job's contractor")
+    if data.review and len(data.review) > 1000:
+        raise HTTPException(status_code=400, detail="Review is too long")
 
     # Check no duplicate rating
     existing = await db.ratings.find_one({
@@ -310,11 +350,17 @@ async def rate_user(job_id: str, data: RatingCreate, current_user: dict = Depend
         "review": data.review,
         "created_at": now_str()
     }
-    await db.ratings.insert_one(rating_doc)
+    from pymongo.errors import DuplicateKeyError
+    try:
+        await db.ratings.insert_one(rating_doc)
+    except DuplicateKeyError:
+        raise HTTPException(status_code=400, detail="Already rated this person for this job")
+    field = "rated_crew" if is_contractor else "rated_by_crew"
+    await db.jobs.update_one({"id": job_id}, {"$addToSet": {field: data.rated_id if is_contractor else current_user["id"]}})
 
-    # Update average rating
-    all_ratings = await db.ratings.find({"rated_id": data.rated_id}, {"_id": 0}).to_list(1000)
-    avg = sum(r["stars"] for r in all_ratings) / len(all_ratings)
+    # Update average rating (hidden/moderated reviews excluded)
+    all_ratings = await db.ratings.find({"rated_id": data.rated_id, "hidden": {"$ne": True}}, {"_id": 0, "stars": 1}).to_list(5000)
+    avg = sum(r["stars"] for r in all_ratings) / len(all_ratings) if all_ratings else 0
     await db.users.update_one(
         {"id": data.rated_id},
         {"$set": {"rating": round(avg, 1), "rating_count": len(all_ratings)}}
@@ -325,7 +371,7 @@ async def rate_user(job_id: str, data: RatingCreate, current_user: dict = Depend
 
 @router.get("/{job_id}/ratings")
 async def get_job_ratings(job_id: str, current_user: dict = Depends(get_current_user)):
-    ratings = await db.ratings.find({"job_id": job_id}, {"_id": 0}).to_list(100)
+    ratings = await db.ratings.find({"job_id": job_id, "hidden": {"$ne": True}}, {"_id": 0}).to_list(100)
     return ratings
 
 
@@ -437,6 +483,54 @@ async def resume_job(job_id: str, current_user: dict = Depends(get_current_user)
     return {"message": "Job resumed", "status": prev_status}
 
 
+@router.get("/{job_id}/contact")
+async def job_poster_contact(job_id: str, current_user: dict = Depends(get_current_user)):
+    """Poster contact is released only to crew accepted on the job (or staff)."""
+    job = await db.jobs.find_one({"id": job_id}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if current_user["id"] not in job.get("crew_accepted", []) and current_user.get("role") not in ("admin", "super_admin"):
+        raise HTTPException(status_code=403, detail="Contact details are shared after you're hired on this job")
+    if job.get("is_guest_post"):
+        guest = await db.guest_jobs.find_one({"id": job["guest_job_id"], "status": "published"}, {"_id": 0, "contact": 1})
+        return (guest or {}).get("contact", {})
+    c = await db.users.find_one({"id": job["contractor_id"]}, {"_id": 0, "name": 1, "company_name": 1, "email": 1, "phone": 1})
+    return c or {}
+
+
+@router.post("/{job_id}/close")
+async def admin_close_job(job_id: str, request: Request, current_user: dict = Depends(get_current_user)):
+    """Admin ends a job: no further accepts or workflow changes."""
+    if current_user.get("role") not in ("admin", "super_admin"):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    reason = str((body or {}).get("reason", ""))[:300]
+    result = await db.jobs.update_one(
+        {"id": job_id, "status": {"$nin": ["completed", "cancelled", "closed"]}},
+        {"$set": {"status": "closed", "closed_at": now_str(), "closed_by": current_user["id"], "close_reason": reason}})
+    if result.modified_count == 0:
+        raise HTTPException(status_code=400, detail="Job not found or already ended")
+    await db.activity_logs.insert_one({"id": str(uuid.uuid4()), "admin_id": current_user["id"], "action": "close_job",
+                                       "target_id": job_id, "details": reason, "created_at": now_str()})
+    return {"message": "Job closed"}
+
+
+@router.get("/{job_id}/recommended-crew")
+async def recommended_crew(job_id: str, current_user: dict = Depends(get_current_user)):
+    job = await db.jobs.find_one({"id": job_id}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job["contractor_id"] != current_user["id"] and current_user.get("role") not in ("admin", "super_admin"):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    from utils.ai_utils import ai_match_crew_for_job
+    from utils.profile_view import build_user_view
+    crew = await db.users.find({"role": "crew", "is_active": True, "availability": True}, {"_id": 0, "password_hash": 0}).to_list(300)
+    by_id = {c["id"]: c for c in crew}
+    matches = (await ai_match_crew_for_job(job, crew))[:10]
+    return [{**await build_user_view(by_id[m["crew_id"]], current_user, include_coords=True),
+             "match_score": m["score"], "match_reason": m["reason"], "distance_miles": m["distance_miles"]} for m in matches]
+
+
 # ─── Notifications ─────────────────────────────────────────────────────────────
 
 @router.get("/notifications/me")
@@ -489,8 +583,9 @@ async def _run_ai_match(job: dict) -> int:
         from utils.ai_utils import ai_match_crew_for_job
         crew = await db.users.find(
             {"role": "crew", "is_active": True, "availability": True},
-            {"_id": 0, "id": 1, "name": 1, "trade": 1, "skills": 1, "rating": 1, "location": 1, "availability": 1}
-        ).to_list(100)
+            {"_id": 0, "id": 1, "name": 1, "trade": 1, "skills": 1, "rating": 1, "location": 1, "lat": 1, "lng": 1,
+             "availability": 1, "is_active": 1, "jobs_completed": 1, "transportation": 1}
+        ).to_list(300)
 
         if not crew:
             return 0
@@ -503,7 +598,7 @@ async def _run_ai_match(job: dict) -> int:
             crew_id = m.get("crew_id")
             if not crew_id:
                 continue
-            existing = await db.notifications.find_one({"user_id": crew_id, "job_id": job["id"], "type": "job_match"})
+            existing = await db.notifications.find_one({"user_id": crew_id, "job_id": job["id"], "type": {"$in": ["job_match", "job_invite"]}})
             if existing:
                 continue
             score_pct = int(m.get("score", 0) * 100)
@@ -535,6 +630,8 @@ async def invite_crew(job_id: str, request: Request, current_user: dict = Depend
         raise HTTPException(status_code=404, detail="Job not found")
     if job["contractor_id"] != current_user["id"] and current_user.get("role") not in ("admin", "super_admin"):
         raise HTTPException(status_code=403, detail="Not your job")
+    if job["status"] != "open":
+        raise HTTPException(status_code=400, detail="Only open jobs with free positions can receive offers")
 
     body = await request.json()
     crew_ids = body.get("crew_ids", [])
@@ -544,9 +641,10 @@ async def invite_crew(job_id: str, request: Request, current_user: dict = Depend
 
     sent = 0
     for crew_id in crew_ids:
-        crew_member = await db.users.find_one({"id": crew_id, "role": "crew"}, {"_id": 0, "id": 1, "name": 1})
-        if not crew_member:
+        crew_member = await db.users.find_one({"id": crew_id, "role": "crew", "is_active": True}, {"_id": 0, "id": 1, "name": 1})
+        if not crew_member or crew_id in job.get("crew_accepted", []):
             continue
+        await db.jobs.update_one({"id": job_id}, {"$addToSet": {"invited_crew": crew_id}})
         existing = await db.notifications.find_one({"user_id": crew_id, "job_id": job_id, "type": "job_invite"})
         if existing:
             continue
@@ -560,6 +658,11 @@ async def invite_crew(job_id: str, request: Request, current_user: dict = Depend
             "read": False,
             "created_at": now_str()
         })
+        try:
+            from routes.ws_routes import manager
+            await manager.send_to_user(crew_id, {"type": "job_invite", "job_id": job_id, "job_title": job["title"]})
+        except Exception:
+            pass
         sent += 1
 
     return {"message": f"Invites sent to {sent} crew members", "sent": sent}

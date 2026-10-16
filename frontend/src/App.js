@@ -3,6 +3,7 @@ import "@/App.css";
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { ThemeProvider } from "./contexts/ThemeContext";
+import { LanguageProvider } from "./contexts/LanguageContext";
 import { WebSocketProvider } from "./contexts/WebSocketContext";
 import { Toaster } from "sonner";
 import LandingPage from "./pages/LandingPage";
@@ -13,6 +14,7 @@ import ContractorDashboard from "./pages/ContractorDashboard";
 import AdminDashboard from "./pages/AdminDashboard";
 import ProfilePage from "./pages/ProfilePage";
 import SubscriptionPage from "./pages/SubscriptionPage";
+import GuestJobPage from "./pages/GuestJobPage";
 import LegalPage from "./pages/LegalPage";
 import AdvertiserPage from "./pages/AdvertiserPage";
 import PublicProfilePage from "./pages/PublicProfilePage";
@@ -60,6 +62,10 @@ function AppRoutes() {
       <Route path="/signup" element={<Navigate to="/auth?mode=register" replace />} />
       <Route path="/auth/callback" element={<AuthCallback />} />
       <Route path="/legal" element={<LegalPage />} />
+      <Route path="/terms" element={<Navigate to="/legal?page=terms" replace />} />
+      <Route path="/privacy" element={<Navigate to="/legal?page=privacy" replace />} />
+      <Route path="/guidelines" element={<Navigate to="/legal?page=guidelines" replace />} />
+      <Route path="/post-job" element={<GuestJobPage />} />
       <Route path="/profile/:userId" element={<PublicProfilePage />} />
       <Route path="/verified-contractors" element={<VerifiedContractorsPage />} />
       <Route path="/our-app" element={<OurAppPage />} />
@@ -90,6 +96,7 @@ function AppRoutes() {
 export default function App() {
   return (
     <ThemeProvider>
+     <LanguageProvider>
       <AuthProvider>
         <BrowserRouter>
           <Toaster position="top-right" richColors />
@@ -97,6 +104,7 @@ export default function App() {
           <PWAInstallPrompt />
         </BrowserRouter>
       </AuthProvider>
+     </LanguageProvider>
     </ThemeProvider>
   );
 }

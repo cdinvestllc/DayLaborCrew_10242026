@@ -38,6 +38,13 @@ class TokenResponse(BaseModel):
 
 # ─── User Models ─────────────────────────────────────────────────────────────
 
+class Certification(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    issuer: Optional[str] = Field(None, max_length=120)
+    number: Optional[str] = Field(None, max_length=60)
+    expires: Optional[str] = Field(None, max_length=20)
+
+
 class ProfileUpdate(BaseModel):
     name: Optional[str] = None
     phone: Optional[str] = None
@@ -52,7 +59,10 @@ class ProfileUpdate(BaseModel):
     address: Optional[str] = None
     lat: Optional[float] = None
     lng: Optional[float] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
     portfolio: Optional[List[str]] = None
+    certifications: Optional[List[Certification]] = Field(None, max_length=20)
 
 
 class LocationUpdate(BaseModel):
@@ -64,15 +74,20 @@ class LocationUpdate(BaseModel):
 # ─── Job Models ──────────────────────────────────────────────────────────────
 
 class JobCreate(BaseModel):
-    title: str
-    description: str
-    trade: str
-    crew_needed: int
+    title: str = Field(..., min_length=3, max_length=120)
+    description: str = Field(..., min_length=10, max_length=4000)
+    trade: str = Field(..., min_length=1, max_length=60)
+    crew_needed: int = Field(..., ge=1, le=50)
     start_time: str
     end_time: Optional[str] = None
-    pay_rate: float
-    address: str
+    pay_rate: float = Field(..., gt=0, le=1000)
+    address: str = Field(..., min_length=3, max_length=300)
     is_emergency: bool = False
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    images: Optional[List[str]] = None
 
 
 class JobUpdate(BaseModel):
@@ -92,7 +107,7 @@ class JobUpdate(BaseModel):
 class RatingCreate(BaseModel):
     rated_id: str
     job_id: str
-    stars: int  # 1-5
+    stars: int = Field(..., ge=1, le=5)
     review: Optional[str] = None
 
 

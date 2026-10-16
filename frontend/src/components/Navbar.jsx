@@ -1,13 +1,17 @@
 import React, { useState, useEffect } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { useLanguage } from "../contexts/LanguageContext";
 import { useAuth } from "../contexts/AuthContext";
 import { useTheme } from "../contexts/ThemeContext";
 import { Sun, Moon, Menu, X, Briefcase, ChevronDown, User, Settings, LogOut, LayoutDashboard, HelpCircle } from "lucide-react";
 import NotificationBell from "./NotificationBell";
+import SafeImage from "./SafeImage";
+import { resolveImageUrl } from "../lib/media";
 
 export default function Navbar({ minimal = false }) {
   const { user, logout } = useAuth();
   const { theme, toggleTheme } = useTheme();
+  const { lang, toggleLang, t } = useLanguage();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const navigate = useNavigate();
@@ -47,6 +51,11 @@ export default function Navbar({ minimal = false }) {
             >
               {theme === "dark" ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
             </button>
+            <button onClick={toggleLang} aria-label={t("Language")}
+              className="text-[#7EC8E3] hover:text-white transition-colors px-2 py-1 text-xs font-bold border border-[#7EC8E3]/50 rounded-md"
+              data-testid="language-toggle">
+              {lang === "es" ? "EN" : "ES"}
+            </button>
 
             {/* Notification Bell — shown when logged in */}
             {user && (
@@ -63,7 +72,7 @@ export default function Navbar({ minimal = false }) {
                   data-testid="user-menu-btn"
                 >
                   {user.profile_photo || user.logo ? (
-                    <img src={`${process.env.REACT_APP_BACKEND_URL}${user.profile_photo || user.logo}`}
+                    <SafeImage src={resolveImageUrl(user.profile_photo || user.logo)}
                       className="w-7 h-7 rounded-full object-cover" alt="avatar" />
                   ) : (
                     <div className="w-7 h-7 bg-[#0000FF] rounded-full flex items-center justify-center text-xs font-bold">
@@ -84,23 +93,23 @@ export default function Navbar({ minimal = false }) {
                     <div className="p-2">
                       <Link to={dashboardPath} onClick={() => setDropdownOpen(false)}
                         className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-sm text-[#050A30] dark:text-white" data-testid="nav-dashboard">
-                        <LayoutDashboard className="w-4 h-4" /> Dashboard
+                        <LayoutDashboard className="w-4 h-4" /> {t("Dashboard")}
                       </Link>
                       <Link to="/profile" onClick={() => setDropdownOpen(false)}
                         className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-sm text-[#050A30] dark:text-white" data-testid="nav-profile">
-                        <User className="w-4 h-4" /> My Profile
+                        <User className="w-4 h-4" /> {t("My Profile")}
                       </Link>
                       <Link to="/subscription" onClick={() => setDropdownOpen(false)}
                         className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-sm text-[#050A30] dark:text-white" data-testid="nav-subscription">
-                        <Settings className="w-4 h-4" /> Subscription
+                        <Settings className="w-4 h-4" /> {t("Subscription")}
                       </Link>
                       <Link to="/settings/app" onClick={() => setDropdownOpen(false)}
                         className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-sm text-[#050A30] dark:text-white" data-testid="nav-app-settings">
-                        <Settings className="w-4 h-4" /> App Settings
+                        <Settings className="w-4 h-4" /> {t("App Settings")}
                       </Link>
                       <button onClick={handleLogout}
                         className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 text-sm text-red-600 mt-1" data-testid="nav-logout">
-                        <LogOut className="w-4 h-4" /> Log Out
+                        <LogOut className="w-4 h-4" /> {t("Log Out")}
                       </button>
                     </div>
                   </div>
@@ -148,15 +157,15 @@ export default function Navbar({ minimal = false }) {
                   <p className="text-[#7EC8E3] text-xs capitalize">{user.role}</p>
                 </div>
               </div>
-              <Link to={dashboardPath} onClick={() => setMobileOpen(false)} className="flex items-center gap-2 py-2 text-white text-sm"><LayoutDashboard className="w-4 h-4" /> Dashboard</Link>
-              <Link to="/profile" onClick={() => setMobileOpen(false)} className="flex items-center gap-2 py-2 text-white text-sm"><User className="w-4 h-4" /> Profile</Link>
-              <Link to="/subscription" onClick={() => setMobileOpen(false)} className="flex items-center gap-2 py-2 text-white text-sm"><Settings className="w-4 h-4" /> Subscription</Link>
+              <Link to={dashboardPath} onClick={() => setMobileOpen(false)} className="flex items-center gap-2 py-2 text-white text-sm"><LayoutDashboard className="w-4 h-4" /> {t("Dashboard")}</Link>
+              <Link to="/profile" onClick={() => setMobileOpen(false)} className="flex items-center gap-2 py-2 text-white text-sm"><User className="w-4 h-4" /> {t("Profile")}</Link>
+              <Link to="/subscription" onClick={() => setMobileOpen(false)} className="flex items-center gap-2 py-2 text-white text-sm"><Settings className="w-4 h-4" /> {t("Subscription")}</Link>
               <button onClick={handleLogout} className="flex items-center gap-2 py-2 text-red-400 text-sm"><LogOut className="w-4 h-4" /> Log Out</button>
             </>
           ) : (
             <div className="flex flex-col gap-2 pt-2">
-              <Link to="/auth?mode=login" className="text-white font-semibold py-2">Log In</Link>
-              <Link to="/auth?mode=register" className="bg-[#0000FF] text-white py-2 px-4 rounded-lg font-bold text-center">Sign Up</Link>
+              <Link to="/auth?mode=login" className="text-white font-semibold py-2">{t("Log In")}</Link>
+              <Link to="/auth?mode=register" className="bg-[#0000FF] text-white py-2 px-4 rounded-lg font-bold text-center">{t("Sign Up")}</Link>
             </div>
           )}
         </div>

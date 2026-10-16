@@ -22,7 +22,7 @@ export default function SubscriptionPage() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const [plans, setPlans] = useState({});
-  const [selectedPlan, setSelectedPlan] = useState("monthly");
+  const [selectedPlan, setSelectedPlan] = useState("");
   const [loading, setLoading] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState("paypal");
   const [couponCode, setCouponCode] = useState("");
@@ -32,13 +32,16 @@ export default function SubscriptionPage() {
 
   const fetchPlans = useCallback(async () => {
     try {
-      const res = await axios.get(`${API}/payments/plans`);
+      const res = await axios.get(`${API}/payments/plans`, { params: { role: user?.role } });
       setPlans(res.data);
+      const keys = Object.keys(res.data);
+      setSelectedPlan(p => (p && res.data[p]) ? p : keys[0] || "");
     } catch { }
-  }, []);
+  }, [user?.role]);
+
+  useEffect(() => { fetchPlans(); }, [fetchPlans]);
 
   useEffect(() => {
-    fetchPlans();
     // Handle PayPal return
     const method = params.get("method");
     const plan = params.get("plan");
@@ -168,21 +171,22 @@ export default function SubscriptionPage() {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
-          {["daily", "weekly", "monthly"].map(plan => (
+          {Object.keys(plans).map(plan => (
             <button key={plan} onClick={() => { setSelectedPlan(plan); clearCoupon(); }}
               className={`card p-6 text-left transition-all border-2 ${selectedPlan === plan ? "border-[#0000FF] shadow-lg shadow-blue-100" : "border-transparent hover:border-slate-200"}`}
               data-testid={`plan-${plan}`}>
               <div className="flex items-center justify-between mb-1">
                 <span className="font-extrabold text-[#050A30] dark:text-white capitalize" style={{ fontFamily: "Manrope, sans-serif" }}>
-                  {plan === "daily" ? "Day Pass" : plan === "weekly" ? "Week Pass" : "Monthly"}
+                  {plans[plan].label}
                 </span>
-                {plan === "monthly" && <span className="bg-[#0000FF] text-white text-xs px-2 py-0.5 rounded-full font-bold">BEST VALUE</span>}
+                {(plan === "crew_annual" || plan === "contractor_pro") && <span className="bg-[#0000FF] text-white text-xs px-2 py-0.5 rounded-full font-bold">BEST VALUE</span>}
               </div>
               <div className="text-3xl font-extrabold text-[#0000FF] mb-1">
                 ${plans[plan]?.amount?.toFixed(2) || "—"}
               </div>
               <div className="text-sm text-slate-500">
-                {plan === "daily" ? "1 day" : plan === "weekly" ? "7 days" : "30 days"}
+                {plans[plan].days === 365 ? "per year" : plans[plan].days === 90 ? "every 3 months" : "per month"}
+                {plans[plan].job_posts ? ` · ${plans[plan].job_posts} job posts` : ""}
               </div>
               {selectedPlan === plan && (
                 <div className="mt-3 w-5 h-5 bg-[#0000FF] rounded-full flex items-center justify-center ml-auto">

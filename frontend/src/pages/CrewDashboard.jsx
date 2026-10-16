@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useAuth } from "../contexts/AuthContext";
+import { useLanguage } from "../contexts/LanguageContext";
 import { useWebSocket } from "../contexts/WebSocketContext";
 import Navbar from "../components/Navbar";
 import MapComponent, { haversine } from "../components/MapComponent";
@@ -125,6 +126,7 @@ function PushNotifyWidget() {
 
 export default function CrewDashboard() {
   const { user, refreshUser, updateUser } = useAuth();
+  const { t } = useLanguage();
   const { addListener, sendLocation, connected } = useWebSocket();
   const [view, setView] = useState("map");
   const [jobs, setJobs] = useState([]);
@@ -233,16 +235,16 @@ export default function CrewDashboard() {
   const acceptJob = async (jobId) => {
     const job = jobs.find(j => j.id === jobId);
     if (job && hasTimeOverlap(job)) {
-      toast.error("You already have a job scheduled that overlaps with this time slot.");
+      toast.error(t("You already have a job scheduled that overlaps with this time slot."));
       return;
     }
     try {
       await axios.post(`${API}/jobs/${jobId}/accept`);
-      toast.success("Job accepted!");
+      toast.success(t("Job accepted!"));
       fetchJobs();
       fetchMyJobs();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Failed to accept job");
+      toast.error(t(e?.response?.data?.detail) || t("Failed to accept job"));
     }
   };
 
@@ -251,8 +253,8 @@ export default function CrewDashboard() {
     try {
       const res = await axios.post(`${API}/users/availability/toggle`);
       updateUser({ availability: res.data.availability });
-      toast.success(res.data.message);
-    } catch { toast.error("Failed to update availability"); }
+      toast.success(t(res.data.availability ? "You are now available for work" : "You are now unavailable for work"));
+    } catch { toast.error(t("Failed to update availability")); }
     setTogglingAvail(false);
   };
 
@@ -268,7 +270,7 @@ export default function CrewDashboard() {
   const completeJob = async (jobId) => {
     try {
       await axios.post(`${API}/jobs/${jobId}/complete`);
-      toast.success("Job marked as complete. Awaiting contractor verification.");
+      toast.success(t("Job marked as complete. Awaiting contractor verification."));
       fetchMyJobs();
       refreshUser();
     } catch (e) {
@@ -285,10 +287,10 @@ export default function CrewDashboard() {
         setFlyToCoords([pos.coords.longitude, pos.coords.latitude]);
         sendLocation(loc.lat, loc.lng);
         setGettingLocation(false);
-        toast.success("Location updated!");
+        toast.success(t("Location updated!"));
         fetchJobs();
       },
-      () => { toast.error("Location access denied"); setGettingLocation(false); }
+      () => { toast.error(t("Location access denied")); setGettingLocation(false); }
     );
   };
 
@@ -302,7 +304,7 @@ export default function CrewDashboard() {
 
   const shareJob = (job) => {
     const url = `${window.location.origin}?job=${job.id}`;
-    navigator.clipboard.writeText(url).then(() => toast.success("Job link copied!")).catch(() => toast.error("Could not copy link"));
+    navigator.clipboard.writeText(url).then(() => toast.success(t("Job link copied!"))).catch(() => toast.error("Could not copy link"));
   };
 
   const acceptedIds = myJobs.map(j => j.id);
@@ -323,7 +325,7 @@ export default function CrewDashboard() {
             <Clock className="w-5 h-5 text-amber-500 flex-shrink-0" />
             <p className="text-sm text-amber-700 dark:text-amber-300">
               <strong>{trialInfo.days_remaining} days</strong> left in your free trial.
-              <a href="/subscription" className="ml-2 underline font-semibold">Subscribe now</a>
+              <a href="/subscription" className="ml-2 underline font-semibold">{t("Subscribe now")}</a>
             </p>
           </div>
         )}
@@ -333,7 +335,7 @@ export default function CrewDashboard() {
             <AlertCircle className="w-5 h-5 text-[#0000FF] flex-shrink-0" />
             <p className="text-sm text-blue-700 dark:text-blue-300">
               Complete your profile to get better job matches.
-              <a href="/profile" className="ml-2 underline font-semibold">Complete profile</a>
+              <a href="/profile" className="ml-2 underline font-semibold">{t("Complete profile")}</a>
             </p>
           </div>
         )}
@@ -342,11 +344,11 @@ export default function CrewDashboard() {
         <div className="flex items-center justify-between mb-4">
           <div>
             <h1 className="text-2xl font-extrabold text-[#050A30] dark:text-white" style={{ fontFamily: "Manrope, sans-serif" }}>
-              Good {new Date().getHours() < 12 ? "morning" : "afternoon"}, {user?.name?.split(" ")[0]}!
+              {t(new Date().getHours() < 12 ? "Good morning" : new Date().getHours() < 18 ? "Good afternoon" : "Good evening")}, {user?.name?.split(" ")[0]}!
             </h1>
             <p className="text-sm text-slate-500 dark:text-slate-400 flex items-center gap-2">
               <span className={`w-2 h-2 rounded-full ${connected ? "bg-emerald-500" : "bg-red-400"}`} />
-              {connected ? "Live updates active" : "Connecting..."}
+              {connected ? t("Live updates active") : t("Connecting...")}
               <span className="px-2 py-0.5 bg-[#050A30] text-white text-xs rounded-full font-semibold capitalize">{user?.role}</span>
             </p>
           </div>
@@ -360,7 +362,7 @@ export default function CrewDashboard() {
             >
               {togglingAvail ? <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current" /> :
                 user?.availability ? <ToggleRight className="w-4 h-4" /> : <ToggleLeft className="w-4 h-4" />}
-              {user?.availability ? "Available" : "Unavailable"}
+              {user?.availability ? t("Available") : t("Unavailable")}
             </button>
 
             {/* Transportation */}
@@ -371,7 +373,7 @@ export default function CrewDashboard() {
                 data-testid="transport-btn"
               >
                 <Truck className="w-4 h-4" />
-                {user?.transportation ? user.transportation.replace("_", "/") : "Transport"}
+                {user?.transportation ? user.transportation.replace("_", "/") : t("Transport")}
               </button>
               {showTransport && (
                 <div className="absolute right-0 mt-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-lg py-1 z-20 min-w-36">
@@ -389,12 +391,12 @@ export default function CrewDashboard() {
               <button onClick={() => setView("map")}
                 className={`px-3 py-1.5 rounded text-sm font-semibold flex items-center gap-1 transition-colors ${view === "map" ? "bg-[#0000FF] text-white" : "text-slate-500"}`}
                 data-testid="view-map-btn">
-                <MapPin className="w-4 h-4" /> Map
+                <MapPin className="w-4 h-4" /> {t("Map")}
               </button>
               <button onClick={() => setView("list")}
                 className={`px-3 py-1.5 rounded text-sm font-semibold flex items-center gap-1 transition-colors ${view === "list" ? "bg-[#0000FF] text-white" : "text-slate-500"}`}
                 data-testid="view-list-btn">
-                <List className="w-4 h-4" /> List
+                <List className="w-4 h-4" /> {t("List")}
               </button>
             </div>
 
@@ -403,7 +405,7 @@ export default function CrewDashboard() {
               className={`flex items-center gap-1 px-3 py-2 rounded-lg text-sm font-semibold border transition-colors ${smartMatch ? "bg-[#7EC8E3] text-[#050A30] border-[#7EC8E3]" : "bg-white dark:bg-slate-800 text-slate-500 border-slate-200 dark:border-slate-700"}`}
               data-testid="smart-match-btn"
             >
-              <Zap className="w-4 h-4" /> AI Match
+              <Zap className="w-4 h-4" /> {t("AI Match")}
             </button>
           </div>
         </div>
@@ -416,7 +418,7 @@ export default function CrewDashboard() {
             className="px-3 py-1.5 rounded-lg text-xs font-semibold border bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700 focus:outline-none focus:border-[#0000FF]"
             data-testid="state-select"
           >
-            <option value="">All States</option>
+            <option value="">{t("All States")}</option>
             {US_STATES.map(s => <option key={s.abbr} value={s.abbr}>{s.name}</option>)}
           </select>
 
@@ -427,7 +429,7 @@ export default function CrewDashboard() {
             data-testid="use-my-location-btn"
           >
             <Navigation className="w-3.5 h-3.5" />
-            {gettingLocation ? "Locating..." : "Use My Location"}
+            {gettingLocation ? "..." : t("Use My Location")}
           </button>
 
           <select
@@ -436,7 +438,7 @@ export default function CrewDashboard() {
             className="px-3 py-1.5 rounded-lg text-xs font-semibold border bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700 focus:outline-none"
             data-testid="distance-filter"
           >
-            <option value="">Any Distance</option>
+            <option value="">{t("Any Distance")}</option>
             {DISTANCE_OPTIONS.map(d => <option key={d} value={d}>{d} miles</option>)}
           </select>
         </div>
@@ -490,8 +492,8 @@ export default function CrewDashboard() {
                 ) : visibleJobs.length === 0 ? (
                   <div className="card p-10 text-center">
                     <MapPin className="w-10 h-10 text-slate-300 mx-auto mb-3" />
-                    <p className="text-slate-500 font-semibold">No jobs found nearby</p>
-                    <p className="text-slate-400 text-sm mt-1">Try expanding your search radius</p>
+                    <p className="text-slate-500 font-semibold">{t("No jobs found nearby")}</p>
+                    <p className="text-slate-400 text-sm mt-1">{t("Try expanding your search radius")}</p>
                   </div>
                 ) : visibleJobs.map(job => {
                   const overlaps = hasTimeOverlap(job);
@@ -531,31 +533,31 @@ export default function CrewDashboard() {
           {/* Sidebar */}
           <div className="space-y-4">
             <div className="card p-4">
-              <h3 className="font-bold text-[#050A30] dark:text-white text-sm mb-3" style={{ fontFamily: "Manrope, sans-serif" }}>Your Stats</h3>
+              <h3 className="font-bold text-[#050A30] dark:text-white text-sm mb-3" style={{ fontFamily: "Manrope, sans-serif" }}>{t("Your Stats")}</h3>
               <div className="grid grid-cols-2 gap-3">
                 <div className="bg-blue-50 dark:bg-blue-950 rounded-lg p-3 text-center">
                   <div className="text-2xl font-extrabold text-[#0000FF]">{user?.jobs_completed || 0}</div>
-                  <div className="text-xs text-slate-500">Jobs Done</div>
+                  <div className="text-xs text-slate-500">{t("Jobs Done")}</div>
                 </div>
                 <div className="bg-amber-50 dark:bg-amber-950 rounded-lg p-3 text-center">
                   <div className="text-2xl font-extrabold text-amber-500">{user?.rating?.toFixed(1) || "—"}</div>
-                  <div className="text-xs text-slate-500">Rating</div>
+                  <div className="text-xs text-slate-500">{t("Rating")}</div>
                 </div>
                 <div className="bg-emerald-50 dark:bg-emerald-950 rounded-lg p-3 text-center">
                   <div className="text-2xl font-extrabold text-emerald-500">{user?.points || 0}</div>
-                  <div className="text-xs text-slate-500">Points</div>
+                  <div className="text-xs text-slate-500">{t("Points")}</div>
                 </div>
                 <div className="bg-purple-50 dark:bg-purple-950 rounded-lg p-3 text-center">
                   <div className="text-2xl font-extrabold text-purple-500">{visibleJobs.length}</div>
-                  <div className="text-xs text-slate-500">Nearby</div>
+                  <div className="text-xs text-slate-500">{t("Nearby")}</div>
                 </div>
               </div>
             </div>
 
             <div className="card p-4">
-              <h3 className="font-bold text-[#050A30] dark:text-white text-sm mb-3" style={{ fontFamily: "Manrope, sans-serif" }}>My Active Jobs</h3>
+              <h3 className="font-bold text-[#050A30] dark:text-white text-sm mb-3" style={{ fontFamily: "Manrope, sans-serif" }}>{t("My Active Jobs")}</h3>
               {myJobs.filter(j => ["in_progress", "fulfilled", "open"].includes(j.status)).length === 0 ? (
-                <p className="text-slate-400 text-sm">No active jobs. Accept a job to get started!</p>
+                <p className="text-slate-400 text-sm">{t("No active jobs. Accept a job to get started!")}</p>
               ) : (
                 <div className="space-y-2">
                   {myJobs.filter(j => ["in_progress", "fulfilled", "open"].includes(j.status)).map(job => (
@@ -566,7 +568,7 @@ export default function CrewDashboard() {
             </div>
 
             <div className="card p-4 bg-gradient-to-br from-[#050A30] to-[#000C66]">
-              <h3 className="font-bold text-white text-sm mb-2" style={{ fontFamily: "Manrope, sans-serif" }}>Your Referral Code</h3>
+              <h3 className="font-bold text-white text-sm mb-2" style={{ fontFamily: "Manrope, sans-serif" }}>{t("Your Referral Code")}</h3>
               <div className="bg-white/10 rounded-lg px-4 py-2 text-[#7EC8E3] font-mono font-bold text-lg text-center mb-2">
                 {user?.referral_code}
               </div>

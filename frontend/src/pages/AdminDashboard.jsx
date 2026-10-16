@@ -15,6 +15,8 @@ import {
   ChevronDown, Database, Send, Filter, ExternalLink, CheckCircle, XCircle,
   Layers, BarChart2, MessageSquare, Key, Zap
 } from "lucide-react";
+import SafeImage from "../components/SafeImage";
+import { resolveImageUrl } from "../lib/media";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -105,7 +107,7 @@ function UserProfileModal({ userId, onClose }) {
           <div className="flex items-center gap-3">
             <div className="w-14 h-14 bg-[#050A30] rounded-full flex items-center justify-center text-white text-2xl font-bold">
               {profile.profile_photo
-                ? <img src={`${process.env.REACT_APP_BACKEND_URL}${profile.profile_photo}`} alt="" className="w-full h-full object-cover rounded-full" />
+                ? <SafeImage src={resolveImageUrl(profile.profile_photo)} alt="" className="w-full h-full object-cover rounded-full" />
                 : profile.name?.[0]?.toUpperCase()}
             </div>
             <div>
@@ -646,7 +648,7 @@ function CMSTab() {
           <div>
             <p className="text-xs font-semibold text-slate-500 uppercase mb-2">Site Logo</p>
             <div className="flex items-center gap-3">
-              {settings.site_logo && <img src={`${process.env.REACT_APP_BACKEND_URL}${settings.site_logo}`} alt="Logo" className="h-10 rounded" />}
+              {settings.site_logo && <SafeImage src={resolveImageUrl(settings.site_logo)} alt="Logo" className="h-10 rounded" />}
               <button onClick={() => logoRef.current?.click()} className="px-3 py-2 border border-slate-300 dark:border-slate-600 rounded-lg text-sm flex items-center gap-1 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-800">
                 <Upload className="w-4 h-4" /> Upload Logo
               </button>
@@ -656,7 +658,7 @@ function CMSTab() {
           <div>
             <p className="text-xs font-semibold text-slate-500 uppercase mb-2">Favicon</p>
             <div className="flex items-center gap-3">
-              {settings.site_favicon && <img src={`${process.env.REACT_APP_BACKEND_URL}${settings.site_favicon}`} alt="Favicon" className="h-8 w-8 rounded" />}
+              {settings.site_favicon && <SafeImage src={resolveImageUrl(settings.site_favicon)} alt="Favicon" className="h-8 w-8 rounded" />}
               <button onClick={() => faviconRef.current?.click()} className="px-3 py-2 border border-slate-300 dark:border-slate-600 rounded-lg text-sm flex items-center gap-1 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-800">
                 <Upload className="w-4 h-4" /> Upload Favicon
               </button>

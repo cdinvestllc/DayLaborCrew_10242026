@@ -1148,3 +1148,20 @@ async def save_push_subscription(request: Request, current_user: dict = Depends(
     )
     return {"message": "Subscription saved"}
 
+
+
+@router.put("/ratings/{rating_id}/moderate")
+async def moderate_rating(rating_id: str, request: Request, admin: dict = Depends(require_admin)):
+    """Hide or restore a review; the rated user's average is recalculated and the action logged."""
+    body = await request.json()
+    hidden = bool(body.get("hidden", True))
+    reason = str(body.get("reason", ""))[:300]
+    rating = await db.ratings.find_one({"id": rating_id}, {"_id": 0})
+    if not rating:
+        raise HTTPException(status_code=404, detail="Rating not found")
+    await db.ratings.update_one({"id": rating_id}, {"$set": {"hidden": hidden, "moderation_reason": reason, "moderated_by": admin["id"]}})
+    visible = await db.ratings.find({"rated_id": rating["rated_id"], "hidden": {"$ne": True}}, {"_id": 0, "stars": 1}).to_list(5000)
+    avg = round(sum(r["stars"] for r in visible) / len(visible), 1) if visible else 0
+    await db.users.update_one({"id": rating["rated_id"]}, {"$set": {"rating": avg, "rating_count": len(visible)}})
+    await log_activity(request, admin, "hide_rating" if hidden else "restore_rating", "rating", rating_id, reason)
+    return {"message": "Rating updated", "rating": avg, "rating_count": len(visible)}

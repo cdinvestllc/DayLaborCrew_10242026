@@ -1,74 +1,21 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useAuth } from "../contexts/AuthContext";
 import Navbar from "../components/Navbar";
+import AddressAutocomplete from "../components/AddressAutocomplete";
+import { CertificationsEditor, CertificationsList } from "../components/Certifications";
+import ProfileChecklist from "../components/ProfileChecklist";
 import { toast } from "sonner";
 import axios from "axios";
 import { Camera, Star, Gift, Copy, Check, Edit2, Save, MapPin, Phone, Briefcase, User, Plus, X, Image, MessageSquare, Shield } from "lucide-react";
+import SafeImage from "../components/SafeImage";
+import { resolveImageUrl } from "../lib/media";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
-const GEOAPIFY_KEY = process.env.REACT_APP_GEOAPIFY_KEY || "02cb3a68d60c4ca49d7dde0c4d7811bf";
 
 const TRADES = ["Carpentry", "Electrical", "Plumbing", "Painting", "Landscaping", "Masonry", "HVAC", "Roofing", "Drywall", "General Labor", "Demolition", "Concrete"];
 
 const ALL_SKILLS = ["Framing", "Drywall", "Painting", "Flooring", "Roofing", "Electrical Work", "Plumbing", "Landscaping", "Concrete", "Welding", "HVAC", "Demolition", "Tile Setting", "Cabinetry", "Deck Building"];
 
-function AddressAutocomplete({ value, onChange, onSelect }) {
-  const [suggestions, setSuggestions] = useState([]);
-  const [show, setShow] = useState(false);
-  const timerRef = useRef(null);
-
-  const search = useCallback(async (q) => {
-    if (q.length < 3) { setSuggestions([]); return; }
-    try {
-      const res = await fetch(`https://api.geoapify.com/v1/geocode/autocomplete?text=${encodeURIComponent(q)}&filter=countrycode:us&format=json&apiKey=${GEOAPIFY_KEY}`);
-      const data = await res.json();
-      setSuggestions((data.results || []).slice(0, 5));
-      setShow(true);
-    } catch {}
-  }, []);
-
-  const handleChange = (e) => {
-    onChange(e.target.value);
-    clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => search(e.target.value), 300);
-  };
-
-  const handleSelect = (item) => {
-    onChange(item.formatted);
-    onSelect({ address: item.formatted, lat: item.lat, lng: item.lon });
-    setSuggestions([]);
-    setShow(false);
-  };
-
-  return (
-    <div className="relative">
-      <div className="relative">
-        <MapPin className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-        <input
-          type="text"
-          value={value}
-          onChange={handleChange}
-          onFocus={() => suggestions.length > 0 && setShow(true)}
-          onBlur={() => setTimeout(() => setShow(false), 200)}
-          placeholder="Enter your address..."
-          className="w-full pl-9 pr-3 py-2.5 border border-slate-300 dark:border-slate-600 rounded-lg text-sm focus:outline-none focus:border-[#0000FF] dark:bg-slate-800 dark:text-white"
-          data-testid="address-input"
-        />
-      </div>
-      {show && suggestions.length > 0 && (
-        <div className="absolute z-30 w-full mt-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-xl max-h-48 overflow-y-auto">
-          {suggestions.map((s, i) => (
-            <button key={i} type="button" onMouseDown={() => handleSelect(s)}
-              className="w-full text-left px-4 py-2.5 text-sm hover:bg-slate-50 dark:hover:bg-slate-700 flex items-center gap-2 text-slate-700 dark:text-slate-300">
-              <MapPin className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
-              {s.formatted}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
 
 function MessagesPanel({ user }) {
   const [threads, setThreads] = useState([]);
@@ -180,8 +127,11 @@ export default function ProfilePage() {
         company_name: user.company_name || "",
         availability: user.availability !== false,
         address: user.address || "",
-        lat: user.lat || null,
-        lng: user.lng || null,
+        lat: user.location?.lat ?? user.lat ?? null,
+        lng: user.location?.lng ?? user.lng ?? null,
+        city: user.location?.city || "",
+        state: user.location?.state || "",
+        certifications: user.certifications || [],
       });
       setPortfolio(user.portfolio || []);
       setPrivacy(user.privacy || {});
@@ -234,8 +184,8 @@ export default function ProfilePage() {
       updateUser({ profile_photo: res.data.url, logo: res.data.url });
       toast.success("Photo updated!");
       await refreshUser();
-    } catch {
-      toast.error("Failed to upload photo");
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed to upload photo");
     }
   };
 
@@ -256,11 +206,11 @@ export default function ProfilePage() {
       const newUrls = res.data.urls || [];
       const updated = [...portfolio, ...newUrls];
       setPortfolio(updated);
-      await axios.put(`${API}/users/profile`, { ...form, portfolio: updated });
+      await axios.put(`${API}/users/profile`, { portfolio: updated });
       updateUser({ portfolio: updated });
       toast.success("Portfolio updated!");
-    } catch {
-      toast.error("Failed to upload images");
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed to upload images");
     }
     setPortfolioUploading(false);
   };
@@ -268,9 +218,14 @@ export default function ProfilePage() {
   const removePortfolioImage = async (url) => {
     const updated = portfolio.filter(u => u !== url);
     setPortfolio(updated);
-    await axios.put(`${API}/users/profile`, { ...form, portfolio: updated });
-    updateUser({ portfolio: updated });
-    toast.success("Image removed");
+    try {
+      await axios.put(`${API}/users/profile`, { portfolio: updated });
+      updateUser({ portfolio: updated });
+      toast.success("Image removed");
+    } catch (e) {
+      setPortfolio(portfolio);
+      toast.error(e?.response?.data?.detail || "Couldn't remove image");
+    }
   };
 
   const copyReferral = () => {
@@ -281,11 +236,18 @@ export default function ProfilePage() {
   };
 
   const updatePrivacy = async (key, value) => {
+    const previous = privacy;
     const updated = { ...privacy, [key]: value };
     setPrivacy(updated);
     try {
-      await axios.put(`${API}/users/privacy`, updated);
-    } catch { }
+      const res = await axios.put(`${API}/users/privacy`, updated);
+      setPrivacy(res.data.privacy);
+      updateUser({ privacy: res.data.privacy });
+      toast.success("Privacy setting saved");
+    } catch {
+      setPrivacy(previous);
+      toast.error("Couldn't save privacy setting");
+    }
   };
 
   const shareProfile = () => {
@@ -308,14 +270,7 @@ export default function ProfilePage() {
   };
 
   const profilePhoto = user?.profile_photo || user?.logo;
-  const profileCompletion = (() => {
-    if (!user) return 0;
-    const fields = ["name", "phone", "bio", "trade"];
-    const filled = fields.filter(f => user[f]).length;
-    const hasSkills = user.skills?.length > 0 ? 1 : 0;
-    const hasPhoto = profilePhoto ? 1 : 0;
-    return Math.round(((filled + hasSkills + hasPhoto) / 6) * 100);
-  })();
+
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-[#020617]" style={{ fontFamily: "Inter, sans-serif" }}>
@@ -329,7 +284,7 @@ export default function ProfilePage() {
               <div className="relative inline-block mb-4">
                 <div className="w-24 h-24 rounded-full overflow-hidden bg-[#050A30] flex items-center justify-center mx-auto border-4 border-[#7EC8E3]">
                   {profilePhoto ? (
-                    <img src={`${process.env.REACT_APP_BACKEND_URL}${profilePhoto}`} alt="Profile" className="w-full h-full object-cover" />
+                    <SafeImage src={resolveImageUrl(profilePhoto)} alt="Profile" className="w-full h-full object-cover" />
                   ) : (
                     <span className="text-white text-3xl font-extrabold">{user?.name?.[0]?.toUpperCase()}</span>
                   )}
@@ -362,16 +317,7 @@ export default function ProfilePage() {
                 {copied ? "Copied!" : "Share Profile"}
               </button>
 
-              {/* Profile Completion */}
-              <div className="mt-4">
-                <div className="flex justify-between text-xs mb-1">
-                  <span className="text-slate-500">Profile Completion</span>
-                  <span className="font-semibold text-[#0000FF]">{profileCompletion}%</span>
-                </div>
-                <div className="w-full bg-slate-200 dark:bg-slate-700 rounded-full h-2">
-                  <div className="bg-[#0000FF] h-2 rounded-full transition-all" style={{ width: `${profileCompletion}%` }} />
-                </div>
-              </div>
+              <ProfileChecklist user={user} onEdit={() => setEditing(true)} />
 
               <div className="grid grid-cols-2 gap-3 mt-4">
                 <div className="bg-blue-50 dark:bg-blue-950 rounded-lg p-2">
@@ -481,7 +427,7 @@ export default function ProfilePage() {
                     <AddressAutocomplete
                       value={form.address || ""}
                       onChange={(v) => setForm(f => ({ ...f, address: v }))}
-                      onSelect={({ address, lat, lng }) => setForm(f => ({ ...f, address, lat, lng }))}
+                      onSelect={({ address, lat, lng, city, state }) => setForm(f => ({ ...f, address, lat, lng, city, state }))}
                     />
                   </div>
 
@@ -491,6 +437,8 @@ export default function ProfilePage() {
                       className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-[#0000FF] dark:bg-slate-800 dark:text-white"
                       placeholder="Tell contractors about your experience..." data-testid="profile-bio-input" />
                   </div>
+
+                  <CertificationsEditor value={form.certifications || []} onChange={certs => setForm(f => ({ ...f, certifications: certs }))} />
 
                   {user?.role === "crew" && (
                     <div>
@@ -544,6 +492,7 @@ export default function ProfilePage() {
                       </div>
                     </div>
                   )}
+                  <CertificationsList items={user?.certifications} />
                 </div>
               )}
             </div>
@@ -576,7 +525,7 @@ export default function ProfilePage() {
                 <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
                   {portfolio.map((url, i) => (
                     <div key={i} className="relative group aspect-square rounded-lg overflow-hidden bg-slate-100 dark:bg-slate-800">
-                      <img src={`${process.env.REACT_APP_BACKEND_URL}${url}`} alt={`Portfolio ${i+1}`} className="w-full h-full object-cover" />
+                      <SafeImage src={resolveImageUrl(url)} alt={`Portfolio ${i+1}`} className="w-full h-full object-cover" />
                       <button onClick={() => removePortfolioImage(url)}
                         className="absolute top-1 right-1 w-6 h-6 bg-red-500 text-white rounded-full items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hidden group-hover:flex"
                         data-testid={`remove-portfolio-${i}`}>
@@ -593,22 +542,23 @@ export default function ProfilePage() {
               <h3 className="font-bold text-[#050A30] dark:text-white text-lg mb-3 flex items-center gap-2" style={{ fontFamily: "Manrope, sans-serif" }}>
                 <Shield className="w-5 h-5 text-[#0000FF]" /> Privacy Settings
               </h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">Your phone and email are private by default. They're shared only with contractors who hire you or pay to unlock your contact.</p>
               <div className="space-y-3">
                 {[
-                  { key: "hide_phone", label: "Hide Phone Number", desc: "Others can't see your phone" },
-                  { key: "hide_email", label: "Hide Email Address", desc: "Others can't see your email" },
-                  { key: "hide_location", label: "Hide Location", desc: "Others can't see your city/state" },
+                  { key: "hide_phone", label: "Hide phone number", desc: "Even after hiring or a paid unlock, your phone stays hidden" },
+                  { key: "hide_email", label: "Hide email address", desc: "Even after hiring or a paid unlock, your email stays hidden" },
+                  { key: "hide_location", label: "Hide exact location", desc: "Others see only your city; you won't appear as a map pin" },
                 ].map(({ key, label, desc }) => (
-                  <div key={key} className="flex items-center justify-between">
-                    <div>
+                  <div key={key} className="flex items-center justify-between gap-4">
+                    <div className="min-w-0">
                       <p className="text-sm font-semibold text-[#050A30] dark:text-white">{label}</p>
-                      <p className="text-xs text-slate-400">{desc}</p>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">{desc}</p>
                     </div>
-                    <button
+                    <button type="button" role="switch" aria-checked={!!privacy[key]} aria-label={label}
                       onClick={() => updatePrivacy(key, !privacy[key])}
-                      className={`w-11 h-6 rounded-full transition-colors relative ${privacy[key] ? "bg-[#0000FF]" : "bg-slate-200 dark:bg-slate-700"}`}
+                      className={`flex-shrink-0 w-11 h-6 rounded-full transition-colors relative ${privacy[key] ? "bg-[#0000FF]" : "bg-slate-300 dark:bg-slate-600"}`}
                       data-testid={`privacy-${key}`}>
-                      <span className={`absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${privacy[key] ? "translate-x-5" : "translate-x-0.5"}`} />
+                      <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${privacy[key] ? "translate-x-5" : "translate-x-0"}`} />
                     </button>
                   </div>
                 ))}
