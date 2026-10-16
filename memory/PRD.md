@@ -99,3 +99,9 @@ Everything from Sessions 1-3 complete and tested.
 - Imported cdinvestllc/DayLaborCrew_New10162026v2 (main); created backend/frontend .env; frontend/.yarnrc ignore-engines.
 - `backend/seed_demo.py` (startup, SEED_DEMO_ACCOUNTS=true): 3 verified contractors (Atlanta area), 2 crew, TEST20 coupon. Idempotent.
 - Fixed MapLibre 5.24 crash on dashboards/verified map: maxBounds full 360° span -> [-179.9,179.9].
+
+## Session (2026-10) - Emergency fee, demo jobs, CSRF, dark mode
+- CSRF tokens are session-bound (HMAC of JWT jti) -> returned in login body + GET /api/auth/csrf; fixes uploads in embedded/cross-site preview where ingress keeps tdl_session (SameSite=None; Partitioned) but drops Lax tdl_csrf.
+- Emergency Job Start fee (default $2.99, admin Settings, min $0.50): emergency jobs created as pending_payment (hidden from crew), Stripe checkout, published on paid (status poll + webhook). Unpaid delete refunds post credit; blocked 30 min after a checkout starts.
+- 9 demo jobs (is_demo) across 3 contractors; dashboards center on saved profile location.
+- Instant My Jobs update; dark-mode contrast CSS (App.css); SW v3 network-first; /api responses no-store; crew list status allow-list.

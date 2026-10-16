@@ -1,0 +1,28 @@
+{
+  "summary": "Backend-only retest. 31/31 pass (iteration-6 suite now uses contractor2, plus the new iteration-7 suite). HIGH bug from iteration 6 is fixed: crew GET /api/jobs/?status=pending_payment|cancelled|in_progress|completed|suspended|bogus returns only open/fulfilled jobs, a newly created pending_payment emergency job never shows up in any crew list query (including ones with a radius) and GET /api/jobs/{id} returns 404 for crew. New refund works: creating an emergency job raises job_posts_used by 1, deleting it while unpaid brings it back to the original value, deleting a regular open job does not refund, and a second delete returns 404 with no second refund. Regression checks pass: crew list with no status, ?status=open, ?status=fulfilled, emergency create -> pending_payment -> Stripe checkout URL, session-only-cookie CSRF upload 200, missing/wrong/other-user token 403, admin fee update/validation/restore, demo jobs.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "DELETE /api/jobs/{id}", "issue": "delete_one result is not checked before refund_job_post_credit, so two concurrent deletes of the same pending job could refund twice. Sequential double-delete is safe (second returns 404). Suggest refunding only if deleted_count == 1."},
+      {"endpoint": "DELETE /api/jobs/{id}", "issue": "The refund ignores job_post_period: a pending job created in the previous billing period and deleted in the new period decrements the new period's count. Admin deleting a contractor's pending job does not refund the contractor (refund only runs when contractor_id == current_user)."},
+      {"endpoint": "POST /api/payments/emergency/stripe/{id} + DELETE", "issue": "The contractor can open Stripe checkout, delete the pending job (credit refunded), then still finish payment. fulfill_emergency_tx would then charge for a job that no longer exists. Consider expiring the Stripe session on delete or blocking delete while a checkout is open."},
+      {"endpoint": "GET /api/jobs/", "issue": "Admin/super_admin fall into the crew branch, so they only see open/fulfilled. Likely fine if admin uses /admin routes."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": ["/app/backend/tests/test_iteration7_crew_status_refund.py", "/app/backend/tests/test_iteration6_csrf_emergency.py", "/app/test_reports/pytest/pytest_iter7.xml"],
+  "action_items": [
+    "Optional: in delete_job, refund only when delete_one().deleted_count == 1 and the job's period matches the current job_post_period",
+    "Optional: expire or ignore Stripe emergency sessions for deleted jobs"
+  ],
+  "critical_code_review_comments": [
+    "The crew allow-list in list_jobs is correct and simple.",
+    "Not changed: AdminDashboard.jsx and ContractorDashboard.jsx are still oversized."
+  ],
+  "updated_files": ["/app/backend/tests/test_iteration7_crew_status_refund.py", "/app/backend/tests/test_iteration6_csrf_emergency.py (contractor fixture now contractor2)"],
+  "success_rate": {"backend": "100% (31/31)", "frontend": "skipped (backend only)"},
+  "seed_data_creation": "None kept. No TEST_iter jobs remain. 1 unpaid orphan emergency_job transaction deleted. Emergency fee is 2.99. contractor2 job_posts_used=1, contractor3 job_posts_used=1 (from the regular-job no-refund tests).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Run: REACT_APP_BACKEND_URL=https://crew-workforce.preview.emergentagent.com pytest backend/tests/test_iteration6_csrf_emergency.py backend/tests/test_iteration7_crew_status_refund.py. Use contractor2/3 for posting. Each regular-job test consumes 1 job post."
+}

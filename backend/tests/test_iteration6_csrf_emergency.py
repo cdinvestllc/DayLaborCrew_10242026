@@ -34,7 +34,7 @@ def session_only(s):
 
 @pytest.fixture(scope="module")
 def contractor():
-    return login("contractor1@test.com", "Test@1234")
+    return login("contractor2@test.com", "Test@1234")
 
 
 @pytest.fixture(scope="module")

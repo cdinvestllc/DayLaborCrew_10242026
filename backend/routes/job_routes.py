@@ -186,8 +186,13 @@ async def delete_job(job_id: str, current_user: dict = Depends(get_current_user)
         raise HTTPException(status_code=403, detail="Not authorized")
     if job.get("crew_accepted") and current_user["role"] not in ("admin", "super_admin"):
         raise HTTPException(status_code=400, detail="Jobs with accepted crew must be cancelled, not deleted")
-    await db.jobs.delete_one({"id": job_id})
-    if job.get("status") == "pending_payment" and job["contractor_id"] == current_user["id"]:
+    if job.get("status") == "pending_payment":
+        recent = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+        if await db.payment_transactions.find_one({"job_id": job_id, "plan": "emergency_job",
+                                                    "payment_status": "pending", "created_at": {"$gt": recent}}):
+            raise HTTPException(status_code=409, detail="A checkout for this job was just started. Finish or abandon it, then try again in 30 minutes.")
+    result = await db.jobs.delete_one({"id": job_id})
+    if result.deleted_count == 1 and job.get("status") == "pending_payment" and job["contractor_id"] == current_user["id"]:
         # Unpaid emergency job never went live: give the job post back
         from routes.payment_routes import refund_job_post_credit
         await refund_job_post_credit(current_user)
