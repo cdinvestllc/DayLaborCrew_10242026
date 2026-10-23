@@ -159,13 +159,23 @@ export default function JobCard({ job, onAccept, onStart, onComplete, onClockIn,
             Verify Complete
           </button>
         )}
-        {isContractor && job.status === "completed" && !job.rated_crew?.includes(currentUser?.id) && (
+        {isContractor && job.status === "completed" &&
+          (job.crew_accepted || []).some(crewId => !(job.rated_crew || []).includes(crewId)) && (
           <button
             onClick={() => onRate?.(job)}
             className="flex-1 bg-yellow-500 text-white font-bold py-2 px-4 rounded-lg text-sm hover:bg-yellow-600 transition-colors"
             data-testid={`rate-job-${job.id}`}
           >
             Rate Workers
+          </button>
+        )}
+        {isCrew && isAccepted && job.status === "completed" && !(job.rated_by_crew || []).includes(currentUser?.id) && (
+          <button
+            onClick={() => onRate?.(job)}
+            className="flex-1 bg-yellow-500 text-white font-bold py-2 px-4 rounded-lg text-sm hover:bg-yellow-600 transition-colors"
+            data-testid={`rate-contractor-${job.id}`}
+          >
+            Rate Contractor
           </button>
         )}
         {(isContractor || (isCrew && isAccepted)) &&

@@ -33,7 +33,7 @@ function RatingModal({ job, onClose, onSubmit }) {
       <div className="card max-w-md w-full p-6 relative">
         <button onClick={onClose} className="absolute top-4 right-4 text-slate-400"><X className="w-5 h-5" /></button>
         <h2 className="font-extrabold text-[#050A30] dark:text-white text-xl mb-4" style={{ fontFamily: "Manrope, sans-serif" }}>Rate Workers</h2>
-        {job.crew_accepted?.map(crewId => (
+        {(job.crew_accepted || []).filter(crewId => !(job.rated_crew || []).includes(crewId)).map(crewId => (
           <div key={crewId} className="mb-4 p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
             <p className="text-sm font-semibold mb-2">Worker ID: {crewId.slice(0, 8)}...</p>
             <div className="flex gap-1 mb-2">
@@ -321,8 +321,13 @@ export default function ContractorDashboard() {
           await axios.post(`${API}/jobs/${job.id}/rate`, { rated_id: crewId, job_id: job.id, stars, review: reviews[crewId] || "" });
         }
       }
-      toast.success("Ratings submitted!"); setRatingJob(null);
-    } catch { toast.error("Failed to submit ratings"); }
+      toast.success("Ratings submitted!");
+    } catch (error) {
+      toast.error(error?.response?.data?.detail || "Some ratings could not be submitted");
+    } finally {
+      setRatingJob(null);
+      fetchJobs();
+    }
   };
 
   const saveFavorite = async (crewId) => {

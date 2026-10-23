@@ -125,6 +125,38 @@ function PushNotifyWidget() {
   );
 }
 
+function CrewRatingModal({ job, onClose, onSubmit }) {
+  const [stars, setStars] = useState(0);
+  const [review, setReview] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const submit = async () => {
+    if (!stars) { toast.error("Choose a star rating first."); return; }
+    if (review.length > 1000) { toast.error("Review must be at most 1,000 characters."); return; }
+    setSubmitting(true);
+    try { await onSubmit(job, stars, review.trim()); }
+    finally { setSubmitting(false); }
+  };
+  return <div className="fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-4" onClick={onClose}>
+    <div className="card w-full max-w-md p-6" onClick={e => e.stopPropagation()} data-testid="crew-rating-modal">
+      <div className="flex items-start justify-between mb-3"><div><h2 className="text-lg font-extrabold text-[#050A30] dark:text-white">Rate Contractor</h2><p className="text-sm text-slate-500">{job.title}</p></div>
+        <button onClick={onClose} aria-label="Close rating form" className="text-slate-400"><X className="w-5 h-5" /></button></div>
+      <p className="text-sm font-semibold mb-2">How was your experience working with {job.contractor_name || "this contractor"}?</p>
+      <div className="flex gap-2 mb-4" role="radiogroup" aria-label="Rating stars">
+        {[1,2,3,4,5].map(value => <button key={value} type="button" onClick={() => setStars(value)}
+          aria-label={`${value} star${value === 1 ? "" : "s"}`} aria-pressed={stars === value}
+          className={`text-3xl ${stars >= value ? "text-amber-400" : "text-slate-300"}`} data-testid={`crew-rating-star-${value}`}>★</button>)}
+      </div>
+      <label className="block text-sm font-semibold">Review (optional)
+        <textarea rows={4} maxLength={1000} value={review} onChange={e => setReview(e.target.value)}
+          className="mt-1 w-full border rounded-lg p-3 text-sm dark:bg-slate-800" placeholder="Share constructive feedback." data-testid="crew-rating-review" />
+        <span className="block text-xs text-slate-400 text-right">{review.length}/1000</span>
+      </label>
+      <div className="flex gap-3 mt-5"><button onClick={onClose} className="flex-1 border rounded-lg py-2.5 font-semibold">Cancel</button>
+        <button onClick={submit} disabled={submitting || !stars} className="flex-1 bg-[#0000FF] text-white rounded-lg py-2.5 font-bold disabled:opacity-60" data-testid="submit-contractor-rating">{submitting ? "Submitting…" : "Submit Rating"}</button></div>
+    </div>
+  </div>;
+}
+
 export default function CrewDashboard() {
   const { user, refreshUser, updateUser } = useAuth();
   const { t } = useLanguage();
@@ -133,6 +165,7 @@ export default function CrewDashboard() {
   const [jobs, setJobs] = useState([]);
   const [myJobs, setMyJobs] = useState([]);
   const [disputeJob, setDisputeJob] = useState(null);
+  const [ratingJob, setRatingJob] = useState(null);
   const [clockInStatuses, setClockInStatuses] = useState({});
   const [clockingInJobs, setClockingInJobs] = useState({});
   // Start from the saved profile location; browser geolocation refines it if allowed
@@ -307,6 +340,20 @@ export default function CrewDashboard() {
       setClockingInJobs(previous => ({ ...previous, [jobId]: false }));
       toast.error("Location permission is required to clock in. Allow location access and try again.");
     }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+  };
+
+  const submitContractorRating = async (job, stars, review) => {
+    try {
+      await axios.post(`${API}/jobs/${job.id}/rate`, {
+        rated_id: job.contractor_id, job_id: job.id, stars, review
+      });
+      toast.success("Rating submitted!");
+      setRatingJob(null);
+      fetchMyJobs();
+      refreshUser();
+    } catch (error) {
+      toast.error(error?.response?.data?.detail || "Could not submit rating");
+    }
   };
 
   const completeJob = async (jobId) => {
@@ -625,7 +672,7 @@ export default function CrewDashboard() {
                     <JobCard key={job.id} job={job} onComplete={completeJob} onClockIn={clockInJob}
                       clockedIn={clockInStatuses[job.id] === true} clockingIn={clockingInJobs[job.id] === true}
                       onReportDispute={(targetJob, initialType) => setDisputeJob({ job: targetJob, initialType })}
-                      currentUser={user} isAccepted={true} />
+                      onRate={setRatingJob} currentUser={user} isAccepted={true} />
                   ))}
                 </div>
               )}
@@ -646,6 +693,7 @@ export default function CrewDashboard() {
         {/* Job Detail Modal */}
         {disputeJob && <DisputeModal job={disputeJob.job} initialType={disputeJob.initialType} currentUser={user}
           onClose={() => setDisputeJob(null)} onSubmitted={() => { setDisputeJob(null); fetchMyJobs(); }} />}
+        {ratingJob && <CrewRatingModal job={ratingJob} onClose={() => setRatingJob(null)} onSubmit={submitContractorRating} />}
 
         {selectedJob && (
           <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setSelectedJob(null)}>
