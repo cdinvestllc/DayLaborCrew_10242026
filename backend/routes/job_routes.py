@@ -3,7 +3,7 @@ from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from database import db
 from auth import get_current_user, user_to_response
-from models import JobCreate, JobUpdate, RatingCreate, ClockInRequest
+from models import JobCreate, JobUpdate, RatingCreate, ClockInRequest, DisputeCreate
 from utils.geocoding import geocode_address, valid_coords, distance_between
 from utils.email_utils import send_job_completion_email
 from utils.ai_utils import generate_smart_job_matches
