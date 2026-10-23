@@ -38,7 +38,8 @@ jobs:
       - name: Install backend dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          grep -v '^emergentintegrations==' requirements.txt > "$RUNNER_TEMP/requirements-ci.txt"
+          pip install -r "$RUNNER_TEMP/requirements-ci.txt"
       - name: Compile backend modules
         run: python -m compileall -q .
       - name: Run hermetic backend regression tests

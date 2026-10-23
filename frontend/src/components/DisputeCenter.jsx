@@ -115,7 +115,7 @@ export default function DisputeCenter({ jobs = [] }) {
           <div className="bg-slate-50 dark:bg-slate-800 rounded-lg p-3"><p className="text-sm whitespace-pre-wrap">{activeCase.reason}</p>
             {activeCase.evidence && <p className="mt-2 pt-2 border-t border-slate-200 dark:border-slate-700 text-xs whitespace-pre-wrap">Initial evidence: {activeCase.evidence}</p>}
           </div>
-          {threadLoading ? <p className="text-sm text-slate-500">Loading conversation…</p> : <>
+          {loadingThread ? <p className="text-sm text-slate-500">Loading conversation…</p> : <>
             <div className="space-y-2 max-h-80 overflow-y-auto" aria-label="Dispute message history">
               {(thread?.messages || []).map(message => <article key={message.id} className="rounded-lg bg-slate-50 dark:bg-slate-800 p-3">
                 <div className="flex flex-wrap justify-between gap-2"><strong className="text-xs">{message.sender_name} · {message.sender_role}</strong><span className="text-[10px] text-slate-400">{message.created_at ? new Date(message.created_at).toLocaleString() : ""}</span></div>
