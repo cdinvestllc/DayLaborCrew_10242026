@@ -973,21 +973,30 @@ async def guest_job_checkout(data: GuestJobRequest, request: Request):
 
 
 async def _publish_paid_guest_job(session_id: str, expected_guest_id: str | None = None) -> str | None:
+    """Publish with a resumable state so webhook retries cannot mark a missing job as paid."""
     guest = await db.guest_jobs.find_one({"session_id": session_id}, {"_id": 0})
     if not guest or (expected_guest_id and guest["id"] != expected_guest_id):
         return None
-    if guest.get("status") == "published":
-        return guest.get("job_id")
-    job_id = str(uuid.uuid4())
-    claimed = await db.guest_jobs.find_one_and_update(
-        {"id": guest["id"], "status": "pending_payment"},
-        {"$set": {"status": "published", "job_id": job_id, "paid_at": now_str()}})
-    if not claimed:
-        latest = await db.guest_jobs.find_one({"id": guest["id"]}, {"_id": 0, "status": 1, "job_id": 1})
-        return latest.get("job_id") if latest and latest.get("status") == "published" else None
-    await db.payment_transactions.update_one(
-        {"session_id": session_id, "plan": "guest_job"},
-        {"$set": {"payment_status": "paid", "updated_at": now_str()}})
+    job_id = guest.get("job_id")
+    created_at = guest.get("created_at") or now_str()
+
+    if guest.get("status") == "pending_payment":
+        job_id = job_id or str(uuid.uuid4())
+        claimed = await db.guest_jobs.find_one_and_update(
+            {"id": guest["id"], "status": "pending_payment"},
+            {"$set": {"status": "publishing", "job_id": job_id}})
+        if not claimed:
+            guest = await db.guest_jobs.find_one({"id": guest["id"]}, {"_id": 0})
+            if not guest or guest.get("status") not in {"publishing", "published"}:
+                return None
+            job_id = guest.get("job_id")
+    elif guest.get("status") not in {"publishing", "published"}:
+        return None
+
+    if not job_id:
+        logger.error("Guest job fulfillment state is missing its job reference")
+        raise RuntimeError("Guest job fulfillment state is incomplete")
+
     job = guest["job"]
     job_doc = {
         "id": job_id, "contractor_id": f"guest:{guest['id']}", "contractor_name": guest["contact"]["name"],
@@ -995,15 +1004,27 @@ async def _publish_paid_guest_job(session_id: str, expected_guest_id: str | None
         "title": job["title"], "description": job["description"], "trade": job["trade"],
         "crew_needed": job["crew_needed"], "crew_accepted": [], "start_time": job["start_time"],
         "end_time": job.get("end_time"), "pay_rate": job["pay_rate"], "location": guest["location"],
-        "status": "open", "is_emergency": False, "created_at": now_str(), "completed_at": None,
+        "status": "open", "is_emergency": False, "created_at": created_at, "completed_at": None,
         "rated_crew": [], "rated_by_crew": [], "invited_crew": [], "images": [],
     }
-    await db.jobs.insert_one(job_doc)
-    try:
-        from routes.ws_routes import manager
-        await manager.broadcast_new_job({k: v for k, v in job_doc.items() if k != "_id"})
-    except Exception:
-        pass
+    result = await db.jobs.update_one({"id": job_id}, {"$setOnInsert": job_doc}, upsert=True)
+    saved = await db.jobs.find_one({"id": job_id}, {"_id": 0, "guest_job_id": 1})
+    if not saved or saved.get("guest_job_id") != guest["id"]:
+        logger.error("Guest job fulfillment ID did not match the saved job")
+        raise RuntimeError("Guest job could not be confirmed")
+
+    await db.guest_jobs.update_one(
+        {"id": guest["id"], "status": {"$in": ["publishing", "published"]}, "job_id": job_id},
+        {"$set": {"status": "published", "paid_at": guest.get("paid_at") or now_str()}})
+    await db.payment_transactions.update_one(
+        {"session_id": session_id, "plan": "guest_job"},
+        {"$set": {"payment_status": "paid", "updated_at": now_str()}})
+    if result.upserted_id:
+        try:
+            from routes.ws_routes import manager
+            await manager.broadcast_new_job({k: v for k, v in job_doc.items() if k != "_id"})
+        except Exception:
+            pass
     return job_id
 
 
