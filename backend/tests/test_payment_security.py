@@ -238,3 +238,10 @@ def test_dispute_models_enforce_reason_and_resolution_note_limits():
         DisputeCreate(dispute_type="job", category="completion", reason="short")
     with pytest.raises(Exception):
         DisputeResolution(resolution="dismiss", notes="x" * 2001)
+
+
+def test_dispute_reason_rejects_whitespace_only_and_trims_padding():
+    with pytest.raises(HTTPException) as err:
+        job_routes.normalize_dispute_reason("          ")
+    assert err.value.status_code == 400
+    assert job_routes.normalize_dispute_reason("  work was not completed  ") == "work was not completed"

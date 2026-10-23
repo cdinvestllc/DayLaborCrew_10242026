@@ -478,6 +478,14 @@ def validate_dispute_submission(job: dict, reporter: dict, dispute_type: str, ca
     raise HTTPException(status_code=400, detail="Dispute type must be job or rating")
 
 
+def normalize_dispute_reason(reason: str) -> str:
+    """Trim a dispute reason and reject whitespace-only submissions."""
+    normalized = reason.strip()
+    if len(normalized) < 10:
+        raise HTTPException(status_code=400, detail="Please describe the issue in at least 10 non-space characters")
+    return normalized
+
+
 def validate_dispute_resolution(dispute: dict, resolution: str) -> None:
     allowed = {"uphold", "dismiss"} if dispute.get("dispute_type") == "job" else {"hide_rating", "restore_rating", "dismiss"}
     if resolution not in allowed:
@@ -502,6 +510,7 @@ async def create_job_dispute(job_id: str, data: DisputeCreate, current_user: dic
             raise HTTPException(status_code=400, detail="rating_id is required for rating disputes")
         rating = await db.ratings.find_one({"id": data.rating_id}, {"_id": 0})
     validate_dispute_submission(job, current_user, data.dispute_type, data.category, rating)
+    clean_reason = normalize_dispute_reason(data.reason)
     duplicate_query = {"job_id": job_id, "reporter_id": current_user["id"],
                        "dispute_type": data.dispute_type, "status": "open"}
     if data.dispute_type == "rating":
@@ -511,7 +520,7 @@ async def create_job_dispute(job_id: str, data: DisputeCreate, current_user: dic
     dispute = {
         "id": str(uuid.uuid4()), "job_id": job_id, "job_title": job.get("title", ""),
         "dispute_type": data.dispute_type, "category": data.category,
-        "reason": data.reason.strip(), "evidence": data.evidence.strip() if data.evidence else "",
+        "reason": clean_reason, "evidence": data.evidence.strip() if data.evidence else "",
         "rating_id": data.rating_id if data.dispute_type == "rating" else None,
         "reporter_id": current_user["id"], "reporter_role": current_user["role"],
         "respondent_id": None,
