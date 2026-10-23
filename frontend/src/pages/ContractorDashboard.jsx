@@ -61,7 +61,8 @@ export default function ContractorDashboard() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [jobs, setJobs] = useState([]);
   const [crew, setCrew] = useState([]);
-  const [crewSearch, setCrewSearch] = useState({ name: "", trade: "" });
+  const [crewSearch, setCrewSearch] = useState({ name: "", trade: "", skill: "", transportation: "", min_rating: "", state: "" });
+  const [crewTradeOptions, setCrewTradeOptions] = useState(TRADES);
   const [showJobForm, setShowJobForm] = useState(false);
   const [ratingJob, setRatingJob] = useState(null);
   const [offerCrew, setOfferCrew] = useState(null);
@@ -96,10 +97,21 @@ export default function ContractorDashboard() {
       const params = new URLSearchParams();
       if (crewSearch.name) params.append("name", crewSearch.name);
       if (crewSearch.trade) params.append("trade", crewSearch.trade);
+      if (crewSearch.skill) params.append("skill", crewSearch.skill);
+      if (crewSearch.transportation) params.append("transportation", crewSearch.transportation);
+      if (crewSearch.min_rating) params.append("min_rating", crewSearch.min_rating);
+      if (crewSearch.state) params.append("state", crewSearch.state);
       const res = await axios.get(`${API}/users/crew?${params}`);
       setCrew(res.data);
     } catch (e) { console.error(e); }
   }, [crewSearch]);
+
+  useEffect(() => {
+    axios.get(`${API}/public/trades`).then(res => {
+      const names = (res.data || []).filter(t => t?.name && t.is_active !== false).map(t => t.name);
+      if (names.length) setCrewTradeOptions(names);
+    }).catch(() => {});
+  }, []);
 
   useEffect(() => {
     const init = async () => {
@@ -431,8 +443,34 @@ export default function ContractorDashboard() {
                   className="w-full border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#0000FF] dark:bg-slate-800 dark:text-white"
                   data-testid="crew-search-trade">
                   <option value="">All Trades</option>
-                  {TRADES.map(t => <option key={t} value={t.toLowerCase()}>{t}</option>)}
+                  {crewTradeOptions.map(t => <option key={t} value={t.toLowerCase()}>{t}</option>)}
                 </select>
+                <select value={crewSearch.skill} onChange={e => setCrewSearch(s => ({ ...s, skill: e.target.value }))}
+                  className="w-full border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 text-sm dark:bg-slate-800 dark:text-white"
+                  data-testid="crew-search-skill">
+                  <option value="">Any Skill</option>
+                  {crewTradeOptions.map(t => <option key={t} value={t}>{t}</option>)}
+                </select>
+                <select value={crewSearch.transportation} onChange={e => setCrewSearch(s => ({ ...s, transportation: e.target.value }))}
+                  className="w-full border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 text-sm dark:bg-slate-800 dark:text-white"
+                  data-testid="crew-search-transportation">
+                  <option value="">Any Transportation</option>
+                  <option value="bike">Bike</option><option value="car">Car</option><option value="suv_van">SUV / Van</option>
+                  <option value="truck">Truck</option><option value="bus">Bus</option><option value="rideshare">Rideshare</option><option value="other">Other</option>
+                </select>
+                <select value={crewSearch.min_rating} onChange={e => setCrewSearch(s => ({ ...s, min_rating: e.target.value }))}
+                  className="w-full border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 text-sm dark:bg-slate-800 dark:text-white"
+                  data-testid="crew-search-rating">
+                  <option value="">Any Rating</option><option value="3">3+ stars</option><option value="4">4+ stars</option><option value="4.5">4.5+ stars</option>
+                </select>
+                <select value={crewSearch.state} onChange={e => setCrewSearch(s => ({ ...s, state: e.target.value }))}
+                  className="w-full border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 text-sm dark:bg-slate-800 dark:text-white"
+                  data-testid="crew-search-state">
+                  <option value="">Any State</option>
+                  {US_STATES.map(s => <option key={s.abbr} value={s.name}>{s.name}</option>)}
+                </select>
+                <button type="button" onClick={() => setCrewSearch({ name: "", trade: "", skill: "", transportation: "", min_rating: "", state: "" })}
+                  className="text-xs font-semibold text-[#0000FF] hover:underline justify-self-start" data-testid="reset-crew-filters">Reset filters</button>
               </div>
             </div>
 
@@ -456,6 +494,7 @@ export default function ContractorDashboard() {
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-semibold text-[#050A30] dark:text-white truncate">{member.name}</p>
+                      {member.search_featured && <span className="inline-flex mt-0.5 px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px] font-bold" data-testid={`featured-crew-${member.id}`}>FEATURED</span>}
                       <p className="text-xs text-slate-500 capitalize">{member.trade || "General"}</p>
                     </div>
                     <div className="flex flex-col items-end gap-1">
