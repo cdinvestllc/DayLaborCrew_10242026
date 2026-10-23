@@ -518,7 +518,7 @@ export default function CrewDashboard() {
                           <Share2 className="w-3 h-3" /> Share
                         </button>
                         {job.contractor_id && (
-                          <a href={`/profile/${job.contractor_id}`}
+                          <a href={`/profile/${job.contractor_id}`} target="_blank" rel="noopener noreferrer"
                             className="flex items-center gap-1 text-xs text-[#0000FF] font-semibold hover:underline"
                             data-testid={`view-contractor-${job.id}`}>
                             View Contractor

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import { useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import Navbar from "../components/Navbar";
 import AddressAutocomplete from "../components/AddressAutocomplete";
@@ -103,7 +104,9 @@ function MessagesPanel({ user }) {
 
 export default function ProfilePage() {
   const { user, refreshUser, updateUser } = useAuth();
+  const navigate = useNavigate();
   const [editing, setEditing] = useState(false);
+  const [convertingToCrew, setConvertingToCrew] = useState(false);
   const [form, setForm] = useState({});
   const [ratings, setRatings] = useState([]);
   const [referralInfo, setReferralInfo] = useState(null);
@@ -259,6 +262,21 @@ export default function ProfilePage() {
     });
   };
 
+  const convertToCrew = async () => {
+    if (!window.confirm("Convert this account to a Crew Member account? Active contractor jobs must be closed first.")) return;
+    setConvertingToCrew(true);
+    try {
+      const res = await axios.post(`${API}/auth/convert-to-crew`);
+      updateUser(res.data.user);
+      toast.success("Account converted to Crew Member");
+      navigate("/crew/dashboard", { replace: true });
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Could not convert account");
+    } finally {
+      setConvertingToCrew(false);
+    }
+  };
+
   const addSkill = (skill) => {
     if (!form.skills.includes(skill)) {
       setForm(f => ({ ...f, skills: [...f.skills, skill] }));
@@ -318,6 +336,14 @@ export default function ProfilePage() {
               </button>
 
               <ProfileChecklist user={user} onEdit={() => setEditing(true)} />
+
+              {user?.role === "contractor" && (
+                <button type="button" onClick={convertToCrew} disabled={convertingToCrew}
+                  className="w-full mt-3 inline-flex items-center justify-center px-4 py-2.5 rounded-lg border border-[#0000FF] text-[#0000FF] font-semibold text-sm hover:bg-blue-50 disabled:opacity-60"
+                  data-testid="convert-to-crew-btn">
+                  {convertingToCrew ? "Converting..." : "Convert to Crew Member"}
+                </button>
+              )}
 
               <div className="grid grid-cols-2 gap-3 mt-4">
                 <div className="bg-blue-50 dark:bg-blue-950 rounded-lg p-2">

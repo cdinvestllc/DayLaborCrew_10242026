@@ -278,6 +278,15 @@ export default function ContractorDashboard() {
     } catch (e) { toast.error(e?.response?.data?.detail || "Failed to cancel job"); }
   };
 
+  const archiveJob = async (jobId) => {
+    if (!window.confirm("Archive this cancelled job?")) return;
+    try {
+      await axios.post(`${API}/jobs/${jobId}/archive`);
+      setJobs(prev => prev.filter(job => job.id !== jobId));
+      toast.success("Job archived");
+    } catch (e) { toast.error(e?.response?.data?.detail || "Failed to archive job"); }
+  };
+
   const suspendJob = async (jobId) => {
     try {
       const res = await axios.post(`${API}/jobs/${jobId}/suspend`);
@@ -464,8 +473,8 @@ export default function ContractorDashboard() {
                           title="Offer Job">
                           Offer
                         </button>
-                        <a href={`/profile/${member.id}`}
-                          className="text-slate-500 hover:text-slate-700 text-xs font-semibold underline"
+                        <a href={`/profile/${member.id}`} target="_blank" rel="noopener noreferrer"
+                          className="inline-flex items-center px-2 py-1 text-xs font-semibold text-[#0000FF] bg-blue-50 border border-blue-200 rounded hover:bg-blue-100 transition-colors"
                           data-testid={`view-profile-crew-${member.id}`}
                           title="View Profile">
                           Profile
@@ -532,6 +541,15 @@ export default function ContractorDashboard() {
                         className="flex-1 flex items-center justify-center gap-1 py-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-700"
                         data-testid={`delete-pending-${job.id}`}>
                         <XCircle className="w-3.5 h-3.5" /> Delete
+                      </button>
+                    </div>
+                  )}
+                  {job.status === "cancelled" && (
+                    <div className="mt-1 px-1">
+                      <button onClick={() => archiveJob(job.id)}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 rounded-lg border border-slate-200 hover:bg-slate-200"
+                        data-testid={`archive-job-${job.id}`}>
+                        Archive
                       </button>
                     </div>
                   )}

@@ -3,7 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { useLanguage } from "../contexts/LanguageContext";
 import { useAuth } from "../contexts/AuthContext";
 import { useTheme } from "../contexts/ThemeContext";
-import { Sun, Moon, Menu, X, Briefcase, ChevronDown, User, Settings, LogOut, LayoutDashboard, HelpCircle } from "lucide-react";
+import { Sun, Moon, Menu, X, Briefcase, ChevronDown, User, Settings, LogOut, LayoutDashboard, HelpCircle, Archive } from "lucide-react";
 import NotificationBell from "./NotificationBell";
 import SafeImage from "./SafeImage";
 import { resolveImageUrl } from "../lib/media";
@@ -99,6 +99,12 @@ export default function Navbar({ minimal = false }) {
                         className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-sm text-[#050A30] dark:text-white" data-testid="nav-profile">
                         <User className="w-4 h-4" /> {t("My Profile")}
                       </Link>
+                      {user.role === "contractor" && (
+                        <Link to="/contractor/archives" onClick={() => setDropdownOpen(false)}
+                          className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-sm text-[#050A30] dark:text-white" data-testid="nav-archives">
+                          <Archive className="w-4 h-4" /> Archived Jobs
+                        </Link>
+                      )}
                       <Link to="/subscription" onClick={() => setDropdownOpen(false)}
                         className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-sm text-[#050A30] dark:text-white" data-testid="nav-subscription">
                         <Settings className="w-4 h-4" /> {t("Subscription")}
@@ -159,6 +165,7 @@ export default function Navbar({ minimal = false }) {
               </div>
               <Link to={dashboardPath} onClick={() => setMobileOpen(false)} className="flex items-center gap-2 py-2 text-white text-sm"><LayoutDashboard className="w-4 h-4" /> {t("Dashboard")}</Link>
               <Link to="/profile" onClick={() => setMobileOpen(false)} className="flex items-center gap-2 py-2 text-white text-sm"><User className="w-4 h-4" /> {t("Profile")}</Link>
+              {user.role === "contractor" && <Link to="/contractor/archives" onClick={() => setMobileOpen(false)} className="flex items-center gap-2 py-2 text-white text-sm"><Archive className="w-4 h-4" /> Archived Jobs</Link>}
               <Link to="/subscription" onClick={() => setMobileOpen(false)} className="flex items-center gap-2 py-2 text-white text-sm"><Settings className="w-4 h-4" /> {t("Subscription")}</Link>
               <button onClick={handleLogout} className="flex items-center gap-2 py-2 text-red-400 text-sm"><LogOut className="w-4 h-4" /> Log Out</button>
             </>
