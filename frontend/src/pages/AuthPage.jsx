@@ -59,7 +59,7 @@ export default function AuthPage() {
     axios.get(`${API}/public/settings`).then(r => {
       if (r.data?.login_message) setLoginMessage(r.data.login_message);
     }).catch(() => {});
-  }, []);
+  }, [params]);
 
   const handleGoogleLogin = () => {
     // Preserve role choice for first-time Google registration; existing accounts keep their stored role.

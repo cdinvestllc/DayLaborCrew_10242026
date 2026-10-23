@@ -6,7 +6,9 @@ import zlib
 import pytest
 import requests
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL").rstrip("/")
+from staging_config import get_seeded_account, get_staging_api_url, get_staging_web_origin
+
+BASE_URL = get_staging_api_url()
 API = f"{BASE_URL}/api"
 
 
@@ -34,17 +36,17 @@ def session_only(s):
 
 @pytest.fixture(scope="module")
 def contractor():
-    return login("contractor2@test.com", "Test@1234")
+    return login(*get_seeded_account("CONTRACTOR2"))
 
 
 @pytest.fixture(scope="module")
 def crew():
-    return login("testcrew@thedaylaborers.com", "Crew@1234")
+    return login(*get_seeded_account("CREW"))
 
 
 @pytest.fixture(scope="module")
 def admin():
-    return login("admin@thedaylaborers.com", "Admin@123")
+    return login(*get_seeded_account("ADMIN"))
 
 
 # ---- CSRF (session-bound) ----
@@ -181,9 +183,9 @@ def test_admin_fee_update_and_restore(admin):
 
 
 # ---- Demo jobs ----
-@pytest.mark.parametrize("email", ["contractor1@test.com", "contractor2@test.com", "contractor3@test.com"])
-def test_demo_jobs_per_contractor(email):
-    s, _ = login(email, "Test@1234")
+@pytest.mark.parametrize("account_name", ["CONTRACTOR1", "CONTRACTOR2", "CONTRACTOR3"])
+def test_demo_jobs_per_contractor(account_name):
+    s, _ = login(*get_seeded_account(account_name))
     jobs = s.get(f"{API}/jobs/my-jobs").json()
     demo = [j for j in jobs if 33.5 < (j.get("location") or {}).get("lat", 0) < 34.2]
     assert len(demo) >= 3
@@ -196,7 +198,7 @@ def test_crew_sees_atlanta_jobs(crew):
 
 
 def test_testcrew2_active_job():
-    s, _ = login("testcrew2@thedaylaborers.com", "Crew@1234")
+    s, _ = login(*get_seeded_account("CREW2"))
     jobs = s.get(f"{API}/jobs/my-jobs").json()
     m = [j for j in jobs if "Drywall Hanging" in j["title"]]
     assert m and m[0]["status"] == "in_progress"

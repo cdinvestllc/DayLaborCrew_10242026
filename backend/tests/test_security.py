@@ -23,13 +23,16 @@ import sys  # noqa: E402
 sys.path.insert(0, str(ROOT))
 import auth  # noqa: E402
 
-BASE = [l.split("=", 1)[1].strip() for l in open(ROOT.parent / "frontend/.env") if l.startswith("REACT_APP_BACKEND_URL=")][0]
+from staging_config import get_staging_api_url, get_staging_mongo_settings
+
+BASE = get_staging_api_url()
 API = f"{BASE}/api"
-WS = BASE.replace("https", "wss") + "/api/ws"
+WS = BASE.replace("https", "wss", 1) + "/api/ws"
 PW = "Sec@Test1234"
 PREFIX = "sec_test_"
 
-mongo = MongoClient(os.environ["MONGO_URL"])[os.environ["DB_NAME"]]
+STAGING_MONGO_URL, STAGING_DB_NAME = get_staging_mongo_settings()
+mongo = MongoClient(STAGING_MONGO_URL)[STAGING_DB_NAME]
 
 
 def make_user(role="crew", active=True, **extra):

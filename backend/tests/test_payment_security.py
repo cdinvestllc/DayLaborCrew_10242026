@@ -20,7 +20,8 @@ os.environ.setdefault("TRUSTED_PROXY_HOPS", "1")
 from auth import limiter  # noqa: E402
 from routes import auth_routes as auth_routes  # noqa: E402
 from routes import payment_routes as payments  # noqa: E402
-from models import ProfileUpdate  # noqa: E402
+from routes import job_routes as job_routes  # noqa: E402
+from models import ProfileUpdate, ClockInRequest, DisputeCreate, DisputeResolution, DisputeMessageCreate, DisputeAppealCreate  # noqa: E402
 from routes.user_routes import _build_crew_search_query  # noqa: E402
 
 
@@ -147,3 +148,176 @@ def test_crew_search_can_include_unavailable_and_unfiltered_members():
     assert _build_crew_search_query(available_only=False) == {
         "role": "crew", "is_active": True
     }
+
+
+def test_clock_in_request_validates_coordinate_accuracy():
+    request = ClockInRequest(lat=33.749, lng=-84.388, accuracy_meters=12.5)
+    assert request.lat == 33.749
+    assert request.lng == -84.388
+    assert request.accuracy_meters == 12.5
+
+
+def test_clock_in_accepts_worker_inside_radius():
+    job = {"location": {"lat": 33.749, "lng": -84.388}}
+    assert job_routes.validate_clock_in_location(job, 33.749, -84.388) == 0
+
+
+def test_clock_in_rejects_worker_outside_radius():
+    job = {"location": {"lat": 33.749, "lng": -84.388}}
+    with pytest.raises(HTTPException) as err:
+        job_routes.validate_clock_in_location(job, 34.0, -84.388)
+    assert err.value.status_code == 403
+
+
+def test_clock_in_fails_closed_when_job_has_no_coordinates():
+    with pytest.raises(HTTPException) as err:
+        job_routes.validate_clock_in_location({"location": {"address": "Atlanta, GA"}}, 33.749, -84.388)
+    assert err.value.status_code == 409
+
+
+@pytest.mark.parametrize("lat,lng", [(None, -84.388), (91, -84.388), (33.749, 181), (float("nan"), -84.388)])
+def test_clock_in_rejects_invalid_gps_coordinates(lat, lng):
+    with pytest.raises(HTTPException) as err:
+        job_routes.validate_clock_in_location(
+            {"location": {"lat": 33.749, "lng": -84.388}}, lat, lng)
+    assert err.value.status_code == 400
+
+
+def test_clock_in_rejects_inaccurate_gps_readings():
+    with pytest.raises(HTTPException) as err:
+        job_routes.validate_clock_in_accuracy(251)
+    assert err.value.status_code == 400
+    assert "not accurate enough" in err.value.detail
+
+
+def test_clock_in_accepts_missing_accuracy_from_older_clients():
+    assert job_routes.validate_clock_in_accuracy(None) is None
+    assert job_routes.validate_clock_in_accuracy(10) is None
+
+
+def test_job_dispute_requires_participant_and_reviewable_state():
+    job = {"id": "job-1", "contractor_id": "contractor-1", "crew_accepted": ["crew-1"],
+           "status": "completed_pending_review"}
+    assert job_routes.validate_dispute_submission(
+        job, {"id": "crew-1", "role": "crew"}, "job", "completion") == "contractor-1"
+    with pytest.raises(HTTPException) as unrelated:
+        job_routes.validate_dispute_submission(job, {"id": "stranger", "role": "crew"}, "job", "completion")
+    assert unrelated.value.status_code == 403
+    with pytest.raises(HTTPException) as completed:
+        job_routes.validate_dispute_submission(
+            {**job, "status": "completed"}, {"id": "crew-1", "role": "crew"}, "job", "completion")
+    assert completed.value.status_code == 409
+
+
+def test_rating_dispute_requires_matching_job_and_author_or_recipient():
+    job = {"id": "job-1", "contractor_id": "contractor-1", "crew_accepted": ["crew-1"], "status": "completed"}
+    rating = {"id": "rating-1", "job_id": "job-1", "rater_id": "contractor-1", "rated_id": "crew-1"}
+    assert job_routes.validate_dispute_submission(
+        job, {"id": "crew-1", "role": "crew"}, "rating", "abusive", rating) == "contractor-1"
+    with pytest.raises(HTTPException) as unrelated:
+        job_routes.validate_dispute_submission(job, {"id": "stranger", "role": "crew"}, "rating", "abusive", rating)
+    assert unrelated.value.status_code == 403
+
+
+def test_dispute_resolution_actions_are_restricted_by_type():
+    job_routes.validate_dispute_resolution({"dispute_type": "job"}, "uphold")
+    job_routes.validate_dispute_resolution({"dispute_type": "rating", "rating_id": "rating-1"}, "hide_rating")
+    with pytest.raises(HTTPException):
+        job_routes.validate_dispute_resolution({"dispute_type": "job"}, "hide_rating")
+    with pytest.raises(HTTPException):
+        job_routes.validate_dispute_resolution({"dispute_type": "rating"}, "restore_rating")
+
+
+def test_rating_summary_recalculates_only_valid_visible_stars():
+    assert job_routes.rating_summary([5, 4, 0, 7, "5"]) == {"rating": 4.5, "rating_count": 2}
+    assert job_routes.rating_summary([]) == {"rating": 0, "rating_count": 0}
+
+
+def test_dispute_models_enforce_reason_and_resolution_note_limits():
+    with pytest.raises(Exception):
+        DisputeCreate(dispute_type="job", category="completion", reason="short")
+    with pytest.raises(Exception):
+        DisputeResolution(resolution="dismiss", notes="x" * 2001)
+
+
+def test_dispute_reason_rejects_whitespace_only_and_trims_padding():
+    with pytest.raises(HTTPException) as err:
+        job_routes.normalize_dispute_reason("          ")
+    assert err.value.status_code == 400
+    assert job_routes.normalize_dispute_reason("  work was not completed  ") == "work was not completed"
+
+
+
+def test_dispute_conversation_is_limited_to_reporter_and_respondents():
+    dispute = {"reporter_id": "crew-1", "respondent_id": "contractor-1",
+               "respondent_ids": ["contractor-1", "crew-2"]}
+    assert job_routes.can_access_dispute(dispute, "crew-1")
+    assert job_routes.can_access_dispute(dispute, "contractor-1")
+    assert job_routes.can_access_dispute(dispute, "crew-2")
+    assert not job_routes.can_access_dispute(dispute, "stranger")
+
+
+def test_dispute_message_policy_tracks_open_appeal_window_and_final_state():
+    from datetime import datetime, timezone, timedelta
+    now = datetime(2026, 10, 23, tzinfo=timezone.utc)
+    resolved = {"status": "resolved", "resolved_at": (now - timedelta(days=2)).isoformat()}
+    expired = {"status": "resolved", "resolved_at": (now - timedelta(days=8)).isoformat()}
+    assert job_routes.dispute_can_message({"status": "open"}, now)
+    assert job_routes.dispute_can_message({"status": "appealed"}, now)
+    assert job_routes.dispute_can_message(resolved, now)
+    assert not job_routes.dispute_can_message(expired, now)
+    assert not job_routes.dispute_can_message({"status": "appeal_resolved"}, now)
+
+
+def test_dispute_appeal_is_participant_only_once_and_within_seven_days():
+    from datetime import datetime, timezone, timedelta
+    now = datetime(2026, 10, 23, tzinfo=timezone.utc)
+    dispute = {"reporter_id": "crew-1", "respondent_id": "contractor-1", "status": "resolved",
+               "resolved_at": (now - timedelta(days=2)).isoformat()}
+    assert job_routes.dispute_can_appeal(dispute, "crew-1", now)
+    job_routes.validate_dispute_appeal(dispute, "crew-1", now)
+    with pytest.raises(HTTPException) as unauthorized:
+        job_routes.validate_dispute_appeal(dispute, "stranger", now)
+    assert unauthorized.value.status_code == 403
+    with pytest.raises(HTTPException) as expired:
+        job_routes.validate_dispute_appeal(
+            {**dispute, "resolved_at": (now - timedelta(days=9)).isoformat()}, "crew-1", now)
+    assert expired.value.status_code == 409
+    with pytest.raises(HTTPException) as repeated:
+        job_routes.validate_dispute_appeal({**dispute, "appeal": {"reason": "duplicate"}}, "crew-1", now)
+    assert repeated.value.status_code == 409
+
+
+def test_appeal_resolution_actions_are_type_specific():
+    job_routes.validate_appeal_resolution({"dispute_type": "job"}, "uphold_original")
+    job_routes.validate_appeal_resolution({"dispute_type": "job"}, "dismiss")
+    job_routes.validate_appeal_resolution({"dispute_type": "rating", "rating_id": "r1"}, "restore_rating")
+    with pytest.raises(HTTPException):
+        job_routes.validate_appeal_resolution({"dispute_type": "job"}, "hide_rating")
+    with pytest.raises(HTTPException):
+        job_routes.validate_appeal_resolution({"dispute_type": "rating"}, "hide_rating")
+
+
+def test_dispute_conversation_models_limit_empty_or_oversized_input():
+    assert DisputeMessageCreate(body=" Please share the invoice ").body.strip() == "Please share the invoice"
+    with pytest.raises(Exception):
+        DisputeMessageCreate(body="x" * 3001)
+    with pytest.raises(Exception):
+        DisputeAppealCreate(reason="short")
+
+
+
+def test_dispute_message_rejects_whitespace_only_body():
+    assert job_routes.normalize_dispute_message("  Please share the invoice  ") == "Please share the invoice"
+    with pytest.raises(HTTPException) as err:
+        job_routes.normalize_dispute_message("   \n  ")
+    assert err.value.status_code == 400
+
+
+
+def test_missing_vendor_checkout_adapter_fails_closed():
+    if payments.STRIPE_CHECKOUT_AVAILABLE:
+        pytest.skip("Vendor checkout SDK is installed in this environment")
+    with pytest.raises(HTTPException) as err:
+        payments.StripeCheckout(api_key="sk_test_example", webhook_url="")
+    assert err.value.status_code == 503

@@ -3,7 +3,9 @@ import os
 import pytest
 import requests
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL").rstrip("/")
+from staging_config import get_seeded_account, get_staging_api_url, get_staging_web_origin
+
+BASE_URL = get_staging_api_url()
 API = f"{BASE_URL}/api"
 
 JOB = {"title": "TEST_iter7 job", "description": "TEST_ automated test job description", "trade": "General Labor",
@@ -22,12 +24,12 @@ def login(email, pw):
 
 @pytest.fixture(scope="module")
 def c3():
-    return login("contractor3@test.com", "Test@1234")
+    return login(*get_seeded_account("CONTRACTOR3"))
 
 
 @pytest.fixture(scope="module")
 def crew():
-    return login("testcrew@thedaylaborers.com", "Crew@1234")
+    return login(*get_seeded_account("CREW"))
 
 
 def used(s):

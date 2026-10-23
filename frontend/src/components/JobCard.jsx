@@ -30,7 +30,7 @@ function formatTime(timeStr) {
   } catch { return timeStr; }
 }
 
-export default function JobCard({ job, onAccept, onStart, onComplete, onVerify, onRate, currentUser, isAccepted }) {
+export default function JobCard({ job, onAccept, onStart, onComplete, onClockIn, clockedIn = false, clockingIn = false, onVerify, onRate, onReportDispute, currentUser, isAccepted }) {
   const isCrew = currentUser?.role === "crew";
   const isContractor = currentUser?.role === "contractor";
   const crewCount = job.crew_accepted?.length || 0;
@@ -96,6 +96,13 @@ export default function JobCard({ job, onAccept, onStart, onComplete, onVerify, 
         />
       </div>
 
+      {job.dispute_status === "open" && (
+        <div className="mb-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 dark:bg-amber-950/30 p-3 text-xs text-amber-800 dark:text-amber-200" role="status" data-testid={`job-dispute-open-${job.id}`}>
+          <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+          <span>This job has an open dispute. Completion verification is paused until an administrator records a resolution.</span>
+        </div>
+      )}
+
       {/* Description */}
       {job.description && (
         <p className="text-xs text-slate-500 dark:text-slate-400 mb-3 line-clamp-2">{job.description}</p>
@@ -111,6 +118,21 @@ export default function JobCard({ job, onAccept, onStart, onComplete, onVerify, 
           >
             Accept Job
           </button>
+        )}
+        {isCrew && isAccepted && job.status === "in_progress" && !clockedIn && (
+          <button
+            onClick={() => onClockIn?.(job.id)}
+            disabled={clockingIn}
+            className="flex-1 bg-blue-600 text-white font-bold py-2 px-4 rounded-lg text-sm hover:bg-blue-700 transition-colors disabled:opacity-60"
+            data-testid={`clock-in-job-${job.id}`}
+          >
+            {clockingIn ? "Checking location..." : "Clock In"}
+          </button>
+        )}
+        {isCrew && isAccepted && job.status === "in_progress" && clockedIn && (
+          <span className="flex items-center gap-1 text-xs text-emerald-700 dark:text-emerald-400 font-semibold px-2" data-testid={`clocked-in-job-${job.id}`}>
+            <CheckCircle className="w-4 h-4" /> Clocked in
+          </span>
         )}
         {isCrew && isAccepted && job.status === "in_progress" && (
           <button
@@ -138,19 +160,38 @@ export default function JobCard({ job, onAccept, onStart, onComplete, onVerify, 
         {isContractor && job.status === "completed_pending_review" && (
           <button
             onClick={() => onVerify?.(job.id)}
-            className="flex-1 bg-emerald-600 text-white font-bold py-2 px-4 rounded-lg text-sm hover:bg-emerald-700 transition-colors"
+            disabled={job.dispute_status === "open"}
+            className="flex-1 bg-emerald-600 text-white font-bold py-2 px-4 rounded-lg text-sm hover:bg-emerald-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             data-testid={`verify-job-${job.id}`}
           >
-            Verify Complete
+            {job.dispute_status === "open" ? "Dispute Under Review" : "Verify Complete"}
           </button>
         )}
-        {isContractor && job.status === "completed" && !job.rated_crew?.includes(currentUser?.id) && (
+        {isContractor && job.status === "completed" &&
+          (job.crew_accepted || []).some(crewId => !(job.rated_crew || []).includes(crewId)) && (
           <button
             onClick={() => onRate?.(job)}
             className="flex-1 bg-yellow-500 text-white font-bold py-2 px-4 rounded-lg text-sm hover:bg-yellow-600 transition-colors"
             data-testid={`rate-job-${job.id}`}
           >
             Rate Workers
+          </button>
+        )}
+        {isCrew && isAccepted && job.status === "completed" && !(job.rated_by_crew || []).includes(currentUser?.id) && (
+          <button
+            onClick={() => onRate?.(job)}
+            className="flex-1 bg-yellow-500 text-white font-bold py-2 px-4 rounded-lg text-sm hover:bg-yellow-600 transition-colors"
+            data-testid={`rate-contractor-${job.id}`}
+          >
+            Rate Contractor
+          </button>
+        )}
+        {(isContractor || (isCrew && isAccepted)) &&
+          ["in_progress", "completed_pending_review", "completed"].includes(job.status) && (
+          <button type="button" onClick={() => onReportDispute?.(job, job.status === "completed" ? "rating" : "job")}
+            className="flex-1 border border-amber-300 text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/30 font-semibold py-2 px-4 rounded-lg text-sm hover:bg-amber-100"
+            data-testid={`report-dispute-${job.id}`}>
+            {job.status === "completed" ? "Challenge Rating" : "Report Issue"}
           </button>
         )}
       </div>

@@ -3,12 +3,12 @@ import pytest
 import requests
 import os
 
-BASE_URL = "https://crew-workforce.preview.emergentagent.com"
+from staging_config import get_seeded_account, get_staging_api_url, get_staging_web_origin
 
-ADMIN_EMAIL = "admin@thedaylaborers.com"
-ADMIN_PASS = "Admin@123"
-CONTRACTOR_EMAIL = "contractor1@test.com"
-CONTRACTOR_PASS = "Test@1234"
+BASE_URL = get_staging_api_url()
+
+ADMIN_EMAIL, ADMIN_PASS = get_seeded_account("ADMIN")
+CONTRACTOR_EMAIL, CONTRACTOR_PASS = get_seeded_account("CONTRACTOR1")
 
 
 def get_token(email, password):

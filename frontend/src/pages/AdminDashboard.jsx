@@ -24,6 +24,7 @@ const ADMIN_TABS = [
   { id: "Overview", label: "Overview", icon: BarChart2 },
   { id: "Users", label: "Users", icon: Users },
   { id: "Jobs", label: "Jobs", icon: Briefcase },
+  { id: "Disputes", label: "Disputes", icon: AlertTriangle },
   { id: "Payments", label: "Payments", icon: DollarSign },
   { id: "Trades", label: "Trades", icon: Tag },
   { id: "CMS", label: "CMS", icon: Globe },
@@ -192,7 +193,7 @@ function JobsTab() {
     setLoading(false);
   }, []);
 
-  useEffect(() => { fetchJobs(1, search, statusFilter, tradeFilter); }, []);
+  useEffect(() => { fetchJobs(1, search, statusFilter, tradeFilter); }, [fetchJobs, search, statusFilter, tradeFilter]);
 
   const deleteJob = async (jobId, title) => {
     if (!window.confirm(`Delete job "${title}"?`)) return;
@@ -726,16 +727,16 @@ function AdsTab() {
   const [filter, setFilter] = useState("pending");
   const [loading, setLoading] = useState(true);
 
-  const fetchAds = async (status = filter) => {
+  const fetchAds = useCallback(async (status = filter) => {
     setLoading(true);
     try {
       const res = await axios.get(`${API}/advertisers/admin/ads${status ? `?status=${status}` : ""}`);
       setAds(res.data);
     } catch { toast.error("Failed to load ads"); }
     setLoading(false);
-  };
+  }, [filter]);
 
-  useEffect(() => { fetchAds(filter); }, [filter]);
+  useEffect(() => { fetchAds(); }, [fetchAds]);
 
   const approve = async (id) => {
     await axios.post(`${API}/advertisers/admin/ads/${id}/approve`);
@@ -1363,7 +1364,155 @@ function CouponsTab() {
   );
 }
 
+function AdminDisputesTab() {
+  const [items, setItems] = useState([]);
+  const [status, setStatus] = useState("open");
+  const [loading, setLoading] = useState(true);
+  const [resolving, setResolving] = useState("");
+  const [replying, setReplying] = useState(false);
+  const [choices, setChoices] = useState({});
+  const [notes, setNotes] = useState({});
+  const [appealChoices, setAppealChoices] = useState({});
+  const [appealNotes, setAppealNotes] = useState({});
+  const [threadId, setThreadId] = useState("");
+  const [thread, setThread] = useState(null);
+  const [reply, setReply] = useState("");
+  const [threadLoading, setThreadLoading] = useState(false);
+  const load = useCallback(async () => {
+    setLoading(true);
+    try { const r = await axios.get(`${API}/admin/disputes?status=${status}`); setItems(r.data || []); }
+    catch (e) { toast.error(e?.response?.data?.detail || "Could not load disputes"); }
+    finally { setLoading(false); }
+  }, [status]);
+  useEffect(() => { load(); }, [load]);
+  const loadThread = useCallback(async () => {
+    if (!threadId) { setThread(null); return; }
+    setThreadLoading(true);
+    try {
+      const r = await axios.get(`${API}/admin/disputes/${threadId}/messages`);
+      setThread(r.data);
+    } catch (e) { toast.error(e?.response?.data?.detail || "Could not load case conversation"); setThread(null); }
+    finally { setThreadLoading(false); }
+  }, [threadId]);
+  useEffect(() => { loadThread(); }, [loadThread]);
+
+  const resolve = async item => {
+    const resolution = choices[item.id] || (item.dispute_type === "job" ? "uphold" : "hide_rating");
+    if (!window.confirm(`Resolve dispute as "${resolution.replaceAll("_", " ")}"?`)) return;
+    setResolving(item.id);
+    try {
+      await axios.post(`${API}/admin/disputes/${item.id}/resolve`, { resolution, notes: notes[item.id] || "" });
+      toast.success("Dispute resolution recorded"); await load();
+      if (threadId === item.id) await loadThread();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Could not resolve dispute"); }
+    finally { setResolving(""); }
+  };
+
+  const resolveAppeal = async item => {
+    const resolution = appealChoices[item.id] || "uphold_original";
+    if (!window.confirm(`Finalize appeal as "${resolution.replaceAll("_", " ")}"? This closes the case thread.`)) return;
+    setResolving(item.id);
+    try {
+      await axios.post(`${API}/admin/disputes/${item.id}/resolve-appeal`, {
+        resolution, notes: appealNotes[item.id] || ""
+      });
+      toast.success("Appeal decision recorded"); await load();
+      if (threadId === item.id) await loadThread();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Could not resolve appeal"); }
+    finally { setResolving(""); }
+  };
+
+  const sendReply = async () => {
+    if (!threadId || !reply.trim()) return;
+    setReplying(true);
+    try {
+      await axios.post(`${API}/admin/disputes/${threadId}/messages`, { body: reply.trim() });
+      setReply("");
+      await loadThread();
+      toast.success("Reply sent");
+    } catch (e) { toast.error(e?.response?.data?.detail || "Could not send reply"); }
+    finally { setReplying(false); }
+  };
+
+  return <section className="space-y-4" data-testid="admin-disputes-tab">
+    <div className="card p-4 flex flex-wrap items-center justify-between gap-3">
+      <div><h2 className="font-bold text-lg text-[#050A30] dark:text-white">Dispute & Rating Resolution</h2>
+      <p className="text-sm text-slate-500">Review evidence, converse with participants, issue decisions, and review appeals.</p></div>
+      <div className="flex gap-2">
+        <select value={status} onChange={e => setStatus(e.target.value)} className="border rounded-lg px-3 py-2 text-sm dark:bg-slate-800" data-testid="dispute-status-filter">
+          <option value="open">Open</option><option value="appealed">Appealed</option><option value="resolved">Resolved</option><option value="appeal_resolved">Appeal resolved</option><option value="all">All</option>
+        </select>
+        <button onClick={load} className="p-2 rounded-lg border" aria-label="Refresh disputes"><RefreshCw className="w-4 h-4" /></button>
+      </div>
+    </div>
+    {loading ? <div className="card p-8 text-center text-slate-500">Loading disputes…</div> : items.length === 0 ?
+      <div className="card p-8 text-center"><CheckCircle className="w-8 h-8 text-emerald-500 mx-auto mb-2" /><p>No disputes found</p></div> :
+      items.map(item => <article key={item.id} className="card p-5 space-y-3" data-testid={`dispute-card-${item.id}`}>
+        <div className="flex flex-wrap justify-between gap-2">
+          <div><div className="flex items-center gap-2 mb-1"><span className="text-xs rounded-full px-2 py-1 bg-amber-100 text-amber-800 capitalize">{item.dispute_type} · {item.category}</span><StatusBadge status={item.status} /></div>
+          <h3 className="font-bold text-[#050A30] dark:text-white">{item.job_title || "Job"} <span className="text-xs text-slate-400">({item.job_id})</span></h3>
+          <p className="text-xs text-slate-500">Reporter: {item.reporter_name} ({item.reporter_role}) · Respondent: {item.respondent_name}</p></div>
+          <p className="text-xs text-slate-400">{item.created_at ? new Date(item.created_at).toLocaleString() : ""}</p>
+        </div>
+        <div className="bg-slate-50 dark:bg-slate-800 p-3 rounded-lg"><p className="text-sm whitespace-pre-wrap">{item.reason}</p>
+          {item.evidence && <p className="text-sm mt-2 pt-2 border-t border-slate-200 dark:border-slate-700 whitespace-pre-wrap"><strong>Evidence:</strong> {item.evidence}</p>}</div>
+        {item.rating && <div className="border rounded-lg p-3"><strong>Rating: {item.rating.stars}/5 {item.rating.hidden ? "(hidden)" : ""}</strong><p className="text-sm text-slate-500">{item.rating.review || "No written review"}</p></div>}
+        <button type="button" onClick={() => setThreadId(threadId === item.id ? "" : item.id)}
+          className="text-sm font-semibold text-[#0000FF] hover:underline" data-testid={`toggle-dispute-thread-${item.id}`}>
+          {threadId === item.id ? "Hide conversation" : "Open conversation"}
+        </button>
+        {threadId === item.id && <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4 space-y-3" data-testid={`admin-dispute-thread-${item.id}`}>
+          {threadLoading ? <p className="text-sm text-slate-500">Loading conversation…</p> : <>
+            <div className="space-y-2 max-h-80 overflow-y-auto">
+              {(thread?.messages || []).map(message => <div key={message.id} className="rounded-lg bg-slate-50 dark:bg-slate-800 p-3">
+                <div className="flex flex-wrap justify-between gap-2"><strong className="text-xs">{message.sender_name} · {message.sender_role}</strong><span className="text-xs text-slate-400">{message.created_at ? new Date(message.created_at).toLocaleString() : ""}</span></div>
+                <p className="text-sm whitespace-pre-wrap mt-1">{message.body}</p>
+                {message.evidence && <p className="text-xs mt-1 whitespace-pre-wrap">Evidence: {message.evidence}</p>}
+              </div>)}
+              {!thread?.messages?.length && <p className="text-sm text-slate-500">No replies yet. Resolution and appeal events are added to this thread.</p>}
+            </div>
+            {thread?.can_message && <div className="flex flex-col sm:flex-row gap-2">
+              <textarea rows={2} maxLength={3000} value={reply} onChange={e => setReply(e.target.value)} placeholder="Reply as administrator…" className="flex-1 border rounded-lg p-2 text-sm dark:bg-slate-800" data-testid="admin-dispute-reply" />
+              <button onClick={sendReply} disabled={replying || !reply.trim()} className="px-4 py-2 rounded-lg bg-[#0000FF] text-white text-sm font-bold disabled:opacity-60">{replying ? "Sending…" : "Send reply"}</button>
+            </div>}
+            {!thread?.can_message && <p className="text-xs text-slate-500">This conversation is closed.</p>}
+          </>}
+        </div>}
+        {item.status === "open" ? <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr_auto] gap-3 items-end">
+          <div><label className="block text-xs font-semibold mb-1">Decision</label><select value={choices[item.id] || (item.dispute_type === "job" ? "uphold" : "hide_rating")}
+            onChange={e => setChoices(p => ({...p,[item.id]:e.target.value}))} className="w-full border rounded-lg p-2 text-sm dark:bg-slate-800" data-testid={`dispute-resolution-${item.id}`}>
+            {item.dispute_type === "job" ? <><option value="uphold">Uphold dispute</option><option value="dismiss">Dismiss</option></> :
+              <><option value="hide_rating">Hide rating</option><option value="restore_rating">Restore rating</option><option value="dismiss">Dismiss</option></>}
+          </select></div>
+          <div><label className="block text-xs font-semibold mb-1">Resolution notes</label><textarea rows={2} maxLength={2000} value={notes[item.id] || ""}
+            onChange={e => setNotes(p => ({...p,[item.id]:e.target.value}))} className="w-full border rounded-lg p-2 text-sm dark:bg-slate-800" placeholder="Decision rationale" data-testid={`dispute-notes-${item.id}`} /></div>
+          <button onClick={() => resolve(item)} disabled={resolving === item.id} className="px-4 py-2 rounded-lg bg-[#0000FF] text-white font-bold text-sm disabled:opacity-60" data-testid={`resolve-dispute-${item.id}`}>{resolving === item.id ? "Saving…" : "Resolve"}</button>
+        </div> : item.status === "appealed" ? <div className="rounded-lg bg-amber-50 dark:bg-amber-950/30 p-4 space-y-3">
+          <p className="font-semibold text-amber-800 dark:text-amber-200">Appeal awaiting administrator decision</p>
+          {item.appeal && <p className="text-sm whitespace-pre-wrap">{item.appeal.reason}{item.appeal.evidence ? `\nEvidence: ${item.appeal.evidence}` : ""}</p>}
+          <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr_auto] gap-3 items-end">
+            <div><label className="block text-xs font-semibold mb-1">Appeal decision</label><select value={appealChoices[item.id] || "uphold_original"}
+              onChange={e => setAppealChoices(p => ({...p,[item.id]:e.target.value}))} className="w-full border rounded-lg p-2 text-sm dark:bg-slate-800" data-testid={`appeal-resolution-${item.id}`}>
+              <option value="uphold_original">Uphold original decision</option>
+              {item.dispute_type === "job" ? <><option value="uphold">Uphold dispute</option><option value="dismiss">Dismiss dispute</option></> :
+                <><option value="hide_rating">Hide rating</option><option value="restore_rating">Restore rating</option></>}
+            </select></div>
+            <div><label className="block text-xs font-semibold mb-1">Final notes</label><textarea rows={2} maxLength={2000} value={appealNotes[item.id] || ""}
+              onChange={e => setAppealNotes(p => ({...p,[item.id]:e.target.value}))} className="w-full border rounded-lg p-2 text-sm dark:bg-slate-800" placeholder="Explain appeal decision" data-testid={`appeal-notes-${item.id}`} /></div>
+            <button onClick={() => resolveAppeal(item)} disabled={resolving === item.id} className="px-4 py-2 rounded-lg bg-[#0000FF] text-white font-bold text-sm disabled:opacity-60" data-testid={`resolve-appeal-${item.id}`}>{resolving === item.id ? "Saving…" : "Finalize appeal"}</button>
+          </div>
+        </div> : <div className="rounded-lg p-3 bg-emerald-50 dark:bg-emerald-950/30 text-sm">
+          <strong>Resolution: {item.resolution?.replaceAll("_"," ")}</strong>{item.resolution_notes && <p>{item.resolution_notes}</p>}
+          {item.status === "resolved" && item.appeal_deadline && <p className="text-xs text-slate-500 mt-1">Appeal deadline: {new Date(item.appeal_deadline).toLocaleString()}</p>}
+          {item.status === "appeal_resolved" && <p className="text-xs text-slate-500 mt-1">Final appeal decision: {item.appeal_resolution?.replaceAll("_", " ")}</p>}
+        </div>}
+      </article>)}
+  </section>;
+}
+
+
 // ─── Main Admin Dashboard ─────────────────────────────────────────────────────
+
 
 function AdminMessagesTab() {
   const [threads, setThreads] = useState([]);
@@ -1905,7 +2054,7 @@ export default function AdminDashboard() {
       setLoading(false);
     };
     load();
-  }, [tab]);
+  }, [tab, fetchAnalytics, fetchUsers, fetchPayments, fetchSettings, userPage, userSearch, userRoleFilter, userStatusFilter]);
 
   const suspendUser = async (userId, isActive) => {
     try {
@@ -2184,6 +2333,9 @@ export default function AdminDashboard() {
             </div>
           </div>
         )}
+
+        {/* ── Disputes ── */}
+        {tab === "Disputes" && <AdminDisputesTab />}
 
         {/* ── Trades ── */}
         {tab === "Trades" && <TradesTab />}

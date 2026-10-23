@@ -6,14 +6,32 @@ import asyncio
 import logging
 import stripe as stripe_sdk
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from fastapi import APIRouter, HTTPException, Request, Depends
 from database import db
 from auth import get_current_user, limiter
 from models import CheckoutRequest
 from utils.email_utils import send_subscription_email
-from emergentintegrations.payments.stripe.checkout import (
-    StripeCheckout, CheckoutSessionRequest, CheckoutSessionResponse, CheckoutStatusResponse
-)
+try:
+    from emergentintegrations.payments.stripe.checkout import (
+        StripeCheckout, CheckoutSessionRequest, CheckoutSessionResponse, CheckoutStatusResponse
+    )
+    STRIPE_CHECKOUT_AVAILABLE = True
+except ImportError:
+    # The vendor checkout adapter isn't available from public PyPI. Keep non-payment
+    # routes/tests importable, but fail closed if a checkout endpoint is invoked.
+    STRIPE_CHECKOUT_AVAILABLE = False
+
+    class StripeCheckout:
+        def __init__(self, *args, **kwargs):
+            raise HTTPException(
+                status_code=503,
+                detail="Stripe checkout integration is unavailable; contact the deployment administrator."
+            )
+
+    CheckoutSessionRequest = dict
+    CheckoutSessionResponse = dict
+    CheckoutStatusResponse = dict
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -44,14 +62,21 @@ def _stripe_api_key() -> str:
 
 
 def _transaction_amount_matches(tx: dict, amount: object, currency: object, *, minor_units: bool = False) -> bool:
-    """Compare a provider-confirmed amount with the amount recorded for this transaction."""
+    """Compare provider amounts using decimal currency arithmetic, never float tolerances."""
     try:
-        actual = float(amount) / (100 if minor_units else 1)
-        expected = float(tx.get("amount"))
-    except (TypeError, ValueError):
+        actual = Decimal(str(amount))
+        expected = Decimal(str(tx.get("amount")))
+        if not actual.is_finite() or not expected.is_finite():
+            return False
+        if minor_units:
+            actual /= Decimal("100")
+        cent = Decimal("0.01")
+        actual = actual.quantize(cent, rounding=ROUND_HALF_UP)
+        expected = expected.quantize(cent, rounding=ROUND_HALF_UP)
+    except (InvalidOperation, TypeError, ValueError):
         return False
     expected_currency = str(tx.get("currency") or "usd").lower()
-    return str(currency or "").lower() == expected_currency and abs(round(actual, 2) - round(expected, 2)) < 0.01
+    return str(currency or "").lower() == expected_currency and actual == expected
 
 
 def _verify_stripe_event(payload: bytes, signature: str, secret: str):

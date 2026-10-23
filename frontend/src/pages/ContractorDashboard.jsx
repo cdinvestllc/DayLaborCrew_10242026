@@ -5,6 +5,8 @@ import { useSearchParams } from "react-router-dom";
 import Navbar from "../components/Navbar";
 import MapComponent from "../components/MapComponent";
 import JobCard from "../components/JobCard";
+import DisputeModal from "../components/DisputeModal";
+import DisputeCenter from "../components/DisputeCenter";
 import { toast } from "sonner";
 import axios from "axios";
 import {
@@ -32,7 +34,7 @@ function RatingModal({ job, onClose, onSubmit }) {
       <div className="card max-w-md w-full p-6 relative">
         <button onClick={onClose} className="absolute top-4 right-4 text-slate-400"><X className="w-5 h-5" /></button>
         <h2 className="font-extrabold text-[#050A30] dark:text-white text-xl mb-4" style={{ fontFamily: "Manrope, sans-serif" }}>Rate Workers</h2>
-        {job.crew_accepted?.map(crewId => (
+        {(job.crew_accepted || []).filter(crewId => !(job.rated_crew || []).includes(crewId)).map(crewId => (
           <div key={crewId} className="mb-4 p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
             <p className="text-sm font-semibold mb-2">Worker ID: {crewId.slice(0, 8)}...</p>
             <div className="flex gap-1 mb-2">
@@ -65,6 +67,7 @@ export default function ContractorDashboard() {
   const [crewTradeOptions, setCrewTradeOptions] = useState(TRADES);
   const [showJobForm, setShowJobForm] = useState(false);
   const [ratingJob, setRatingJob] = useState(null);
+  const [disputeJob, setDisputeJob] = useState(null);
   const [offerCrew, setOfferCrew] = useState(null);
   const [loading, setLoading] = useState(true);
   // Start from the saved business location; browser geolocation refines it if allowed
@@ -319,8 +322,13 @@ export default function ContractorDashboard() {
           await axios.post(`${API}/jobs/${job.id}/rate`, { rated_id: crewId, job_id: job.id, stars, review: reviews[crewId] || "" });
         }
       }
-      toast.success("Ratings submitted!"); setRatingJob(null);
-    } catch { toast.error("Failed to submit ratings"); }
+      toast.success("Ratings submitted!");
+    } catch (error) {
+      toast.error(error?.response?.data?.detail || "Some ratings could not be submitted");
+    } finally {
+      setRatingJob(null);
+      fetchJobs();
+    }
   };
 
   const saveFavorite = async (crewId) => {
@@ -346,9 +354,12 @@ export default function ContractorDashboard() {
       <Navbar />
       {boostJob && <BoostJobModal job={boostJob} onClose={() => setBoostJob(null)} onSuccess={() => { setBoostJob(null); fetchJobs(); }} />}
       {ratingJob && <RatingModal job={ratingJob} onClose={() => setRatingJob(null)} onSubmit={submitRatings} />}
+      {disputeJob && <DisputeModal job={disputeJob.job} initialType={disputeJob.initialType} currentUser={user}
+        onClose={() => setDisputeJob(null)} onSubmitted={() => { setDisputeJob(null); fetchJobs(); }} />}
       {offerCrew && <OfferCrewModal crew={offerCrew} jobs={jobs} onClose={() => setOfferCrew(null)} />}
 
       <div className="max-w-[1400px] mx-auto px-4 py-4">
+        <DisputeCenter jobs={jobs} />
 
         {pollingEmergency && (
           <div className="mb-4 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 rounded-xl p-4 flex items-center gap-3" data-testid="polling-emergency-banner">
@@ -567,7 +578,9 @@ export default function ContractorDashboard() {
                 </div>
               ) : jobs.map(job => (
                 <div key={job.id}>
-                  <JobCard job={job} onStart={startJob} onVerify={verifyJob} onRate={setRatingJob} currentUser={user} />
+                  <JobCard job={job} onStart={startJob} onVerify={verifyJob} onRate={setRatingJob}
+                    onReportDispute={(targetJob, initialType) => setDisputeJob({ job: targetJob, initialType })}
+                    currentUser={user} />
                   {job.status === "pending_payment" && (
                     <div className="flex gap-2 mt-1 px-1" data-testid={`pending-payment-actions-${job.id}`}>
                       <button onClick={() => startEmergencyCheckout(job.id)} disabled={payingJobId === job.id}

@@ -1,3 +1,10 @@
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+
+jest.mock("maplibre-gl", () => ({
+  __esModule: true,
+  default: { Map: jest.fn(), Marker: jest.fn() },
+}));
+
 import { createRadiusGeoJSON, createStableJobMarker } from "./MapComponent";
 
 test("hover animation does not overwrite MapLibre's marker positioning transform", () => {

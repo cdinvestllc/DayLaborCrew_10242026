@@ -1,14 +1,14 @@
 """Tests for 3 new features: verified contractor email, push notification widget, admin revoke verified"""
 import pytest
 import requests
+
+from staging_config import get_seeded_account, get_staging_api_url, get_staging_web_origin
 import os
 
-BASE_URL = os.environ.get('REACT_APP_BACKEND_URL', '').rstrip('/')
+BASE_URL = get_staging_api_url()
 
-ADMIN_EMAIL = "admin@thedaylaborers.com"
-ADMIN_PASS = "Admin@123"
-CONTRACTOR_EMAIL = "contractor1@test.com"
-CONTRACTOR_PASS = "Test@1234"
+ADMIN_EMAIL, ADMIN_PASS = get_seeded_account("ADMIN")
+CONTRACTOR_EMAIL, CONTRACTOR_PASS = get_seeded_account("CONTRACTOR1")
 
 
 @pytest.fixture(scope="module")

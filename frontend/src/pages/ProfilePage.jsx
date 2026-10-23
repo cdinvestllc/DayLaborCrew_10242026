@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import Navbar from "../components/Navbar";
@@ -148,28 +148,34 @@ export default function ProfilePage() {
       });
       setPortfolio(user.portfolio || []);
       setPrivacy(user.privacy || {});
-      fetchReferralInfo();
-      fetchRatings();
     }
   }, [user]);
 
-  const fetchRatings = async () => {
+  const fetchRatings = useCallback(async () => {
     try {
       const myJobs = await axios.get(`${API}/jobs/my-jobs`);
       const completedJobs = (myJobs.data || []).filter(j => j.status === "completed");
       if (completedJobs.length > 0) {
         const ratingRes = await axios.get(`${API}/jobs/${completedJobs[0].id}/ratings`);
         setRatings(ratingRes.data.filter(r => r.rated_id === user?.id) || []);
+      } else {
+        setRatings([]);
       }
     } catch { }
-  };
+  }, [user?.id]);
 
-  const fetchReferralInfo = async () => {
+  const fetchReferralInfo = useCallback(async () => {
     try {
       const res = await axios.get(`${API}/users/referral/info`);
       setReferralInfo(res.data);
     } catch { }
-  };
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    fetchReferralInfo();
+    fetchRatings();
+  }, [user, fetchReferralInfo, fetchRatings]);
 
   const saveProfile = async () => {
     setLoading(true);

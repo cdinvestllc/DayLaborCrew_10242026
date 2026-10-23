@@ -41,22 +41,7 @@ export default function SubscriptionPage() {
 
   useEffect(() => { fetchPlans(); }, [fetchPlans]);
 
-  useEffect(() => {
-    // Handle PayPal return
-    const method = params.get("method");
-    const plan = params.get("plan");
-    const orderId = params.get("order_id") || params.get("token");
-    if (method === "paypal" && plan && orderId) {
-      capturePayPal(orderId, plan);
-    }
-    // Handle Stripe return
-    const sessionId = params.get("session_id");
-    if (sessionId && method === "stripe") {
-      verifyStripe(sessionId);
-    }
-  }, []);
-
-  const capturePayPal = async (orderId, plan) => {
+  const capturePayPal = useCallback(async (orderId, plan) => {
     setLoading(true);
     try {
       const res = await axios.post(`${API}/payments/paypal/capture/${orderId}?plan=${plan}`);
@@ -67,11 +52,12 @@ export default function SubscriptionPage() {
       }
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Payment capture failed");
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
-  };
+  }, [refreshUser, navigate, user?.role]);
 
-  const verifyStripe = async (sessionId) => {
+  const verifyStripe = useCallback(async (sessionId) => {
     setLoading(true);
     try {
       const res = await axios.get(`${API}/payments/stripe/status/${sessionId}`);
@@ -81,8 +67,23 @@ export default function SubscriptionPage() {
         setTimeout(() => navigate(user?.role === "contractor" ? "/contractor/dashboard" : "/crew/dashboard"), 1500);
       }
     } catch { }
-    setLoading(false);
-  };
+    finally {
+      setLoading(false);
+    }
+  }, [refreshUser, navigate, user?.role]);
+
+  useEffect(() => {
+    const method = params.get("method");
+    const plan = params.get("plan");
+    const orderId = params.get("order_id") || params.get("token");
+    if (method === "paypal" && plan && orderId) {
+      capturePayPal(orderId, plan);
+    }
+    const sessionId = params.get("session_id");
+    if (sessionId && method === "stripe") {
+      verifyStripe(sessionId);
+    }
+  }, [params, capturePayPal, verifyStripe]);
 
   const validateCoupon = async () => {
     if (!couponCode.trim()) return;
