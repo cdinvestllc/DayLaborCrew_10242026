@@ -321,3 +321,164 @@ def test_missing_vendor_checkout_adapter_fails_closed():
     with pytest.raises(HTTPException) as err:
         payments.StripeCheckout(api_key="sk_test_example", webhook_url="")
     assert err.value.status_code == 503
+
+
+class _MemoryResult:
+    def __init__(self, modified_count):
+        self.modified_count = modified_count
+
+
+class _MemoryUsers:
+    def __init__(self, user):
+        self.user = dict(user)
+
+    async def find_one(self, query, projection=None):
+        if query.get("id") != self.user.get("id"):
+            return None
+        return dict(self.user)
+
+    async def update_one(self, query, update):
+        if query.get("id") != self.user.get("id"):
+            return _MemoryResult(0)
+        expected_end = query.get("subscription_end", object())
+        if isinstance(expected_end, dict) and expected_end.get("$exists") is False:
+            if "subscription_end" in self.user:
+                return _MemoryResult(0)
+        elif expected_end is not None and expected_end != self.user.get("subscription_end"):
+            return _MemoryResult(0)
+        marker_condition = query.get("subscription_payment_sessions")
+        if isinstance(marker_condition, dict) and marker_condition.get("$ne") in (
+            self.user.get("subscription_payment_sessions") or []
+        ):
+            return _MemoryResult(0)
+
+        changed = False
+        for key, value in update.get("$set", {}).items():
+            if self.user.get(key) != value:
+                self.user[key] = value
+                changed = True
+        for key, value in update.get("$addToSet", {}).items():
+            items = self.user.setdefault(key, [])
+            if value not in items:
+                items.append(value)
+                changed = True
+        return _MemoryResult(int(changed))
+
+
+class _MemoryCoupons:
+    def __init__(self, coupon):
+        self.coupon = dict(coupon)
+
+    async def update_one(self, query, update):
+        if query.get("code") != self.coupon.get("code"):
+            return _MemoryResult(0)
+        marker_condition = query.get("applied_payment_sessions")
+        if isinstance(marker_condition, dict) and marker_condition.get("$ne") in (
+            self.coupon.get("applied_payment_sessions") or []
+        ):
+            return _MemoryResult(0)
+        self.coupon["usage_count"] = self.coupon.get("usage_count", 0) + update.get("$inc", {}).get("usage_count", 0)
+        marker = update.get("$addToSet", {}).get("applied_payment_sessions")
+        if marker and marker not in self.coupon.setdefault("applied_payment_sessions", []):
+            self.coupon["applied_payment_sessions"].append(marker)
+        return _MemoryResult(1)
+
+
+class _MemoryTransactions:
+    def __init__(self, tx):
+        self.tx = dict(tx)
+        self.update_calls = []
+
+    async def find_one(self, query, projection=None):
+        if query.get("session_id") != self.tx.get("session_id"):
+            return None
+        return dict(self.tx)
+
+    async def update_one(self, query, update):
+        self.update_calls.append((query, update))
+        if query.get("session_id") != self.tx.get("session_id"):
+            return _MemoryResult(0)
+        status_condition = query.get("payment_status")
+        if isinstance(status_condition, dict) and "$nin" in status_condition:
+            if self.tx.get("payment_status") in status_condition["$nin"]:
+                return _MemoryResult(0)
+        self.tx.update(update.get("$set", {}))
+        return _MemoryResult(1)
+
+
+def test_subscription_fulfillment_is_idempotent_for_the_same_provider_session(monkeypatch):
+    from datetime import datetime, timezone, timedelta
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    import asyncio
+
+    original_end = (datetime.now(timezone.utc) + timedelta(days=10)).isoformat()
+    users = _MemoryUsers({
+        "id": "user-1",
+        "email": "worker@example.test",
+        "name": "Test Worker",
+        "subscription_status": "active",
+        "subscription_plan": "crew_monthly",
+        "subscription_end": original_end,
+    })
+    coupons = _MemoryCoupons({"code": "TEST20", "usage_count": 0})
+    monkeypatch.setattr(payments, "db", SimpleNamespace(users=users, coupons=coupons))
+    email = AsyncMock()
+    monkeypatch.setattr(payments, "send_subscription_email", email)
+
+    first_end = asyncio.run(payments.update_subscription(
+        "user-1", "crew_monthly", 30, "stripe", 19.99, "TEST20", payment_session_id="cs_once"
+    ))
+    second_end = asyncio.run(payments.update_subscription(
+        "user-1", "crew_monthly", 30, "stripe", 19.99, "TEST20", payment_session_id="cs_once"
+    ))
+
+    assert first_end == second_end
+    assert _parse_subscription_end(first_end) > _parse_subscription_end(original_end)
+    assert users.user["subscription_payment_sessions"] == ["cs_once"]
+    assert coupons.coupon["usage_count"] == 1
+    assert coupons.coupon["applied_payment_sessions"] == ["cs_once"]
+    assert email.await_count == 1
+
+
+def _parse_subscription_end(value):
+    from datetime import datetime
+    return datetime.fromisoformat(value)
+
+
+def test_subscription_transaction_remains_retryable_if_entitlement_write_fails(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    import asyncio
+
+    tx = {
+        "session_id": "cs_retry",
+        "user_id": "user-1",
+        "plan": "crew_monthly",
+        "payment_method": "stripe",
+        "payment_status": "pending",
+        "amount": 19.99,
+    }
+    transactions = _MemoryTransactions(tx)
+    monkeypatch.setattr(payments, "db", SimpleNamespace(payment_transactions=transactions))
+    grant = AsyncMock(side_effect=RuntimeError("temporary database error"))
+    monkeypatch.setattr(payments, "update_subscription", grant)
+
+    with pytest.raises(RuntimeError, match="temporary database error"):
+        asyncio.run(payments.fulfill_subscription_tx("cs_retry", expected_provider="stripe"))
+
+    assert transactions.tx["payment_status"] == "pending"
+    assert transactions.update_calls == []
+
+
+@pytest.mark.parametrize(
+    "tx,provider,amount,currency,expected",
+    [
+        ({"payment_method": "paypal", "amount": 19.99, "currency": "usd"}, "paypal", "19.99", "USD", True),
+        ({"payment_method": "stripe", "amount": 19.99, "currency": "usd"}, "paypal", "19.99", "USD", False),
+        ({"payment_method": "paypal", "amount": 19.99, "currency": "usd"}, "paypal", "19.98", "USD", False),
+        ({"payment_method": "paypal", "amount": 19.99, "currency": "usd"}, "paypal", "19.99", "EUR", False),
+    ],
+)
+def test_payment_capture_requires_matching_provider_amount_and_currency(tx, provider, amount, currency, expected):
+    assert payments._payment_matches_transaction(tx, provider, amount, currency) is expected
