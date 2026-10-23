@@ -192,13 +192,25 @@ async def delete_job(job_id: str, current_user: dict = Depends(get_current_user)
 
     pending_emergency = job.get("status") == "pending_payment" and job.get("is_emergency")
     if pending_emergency:
-        if await db.payment_transactions.find_one({
-            "job_id": job_id, "plan": "emergency_job", "payment_status": "paid"}):
+        # Atomically cancel every pending checkout. The payment webhook can only claim
+        # a transaction while it is still pending, so either deletion or fulfillment wins.
+        while True:
+            cancelled_tx = await db.payment_transactions.find_one_and_update(
+                {"job_id": job_id, "plan": "emergency_job", "payment_status": "pending"},
+                {"$set": {"payment_status": "cancelled", "cancelled_at": now_str(),
+                          "cancel_reason": "job_deleted"}})
+            if not cancelled_tx:
+                break
+
+        paid_tx = await db.payment_transactions.find_one({
+            "job_id": job_id, "plan": "emergency_job", "payment_status": "paid"})
+        if paid_tx:
+            await db.payment_transactions.update_many(
+                {"job_id": job_id, "plan": "emergency_job", "payment_status": "cancelled",
+                 "cancel_reason": "job_deleted"},
+                {"$set": {"payment_status": "pending"},
+                 "$unset": {"cancelled_at": "", "cancel_reason": ""}})
             raise HTTPException(status_code=409, detail="Payment has completed. Refresh your jobs before deleting.")
-        await db.payment_transactions.update_many(
-            {"job_id": job_id, "plan": "emergency_job", "payment_status": "pending"},
-            {"$set": {"payment_status": "cancelled", "cancelled_at": now_str(),
-                      "cancel_reason": "job_deleted"}})
 
     delete_filter = {"id": job_id}
     if pending_emergency:
