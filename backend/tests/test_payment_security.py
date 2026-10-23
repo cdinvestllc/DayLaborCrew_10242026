@@ -20,6 +20,7 @@ os.environ.setdefault("TRUSTED_PROXY_HOPS", "1")
 from auth import limiter  # noqa: E402
 from routes import auth_routes as auth_routes  # noqa: E402
 from routes import payment_routes as payments  # noqa: E402
+from models import ProfileUpdate  # noqa: E402
 
 
 def test_global_api_rate_limit_is_enabled():
@@ -118,3 +119,8 @@ def test_google_signup_rejects_privileged_or_invalid_roles(role):
     with pytest.raises(HTTPException) as err:
         auth_routes.oauth_signup_role(role)
     assert err.value.status_code == 400
+
+
+def test_profile_update_accepts_boolean_insurance_status():
+    assert ProfileUpdate(is_insured=True).model_dump(exclude_none=True)["is_insured"] is True
+    assert ProfileUpdate(is_insured=False).model_dump(exclude_none=True)["is_insured"] is False

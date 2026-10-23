@@ -1,4 +1,5 @@
 import os
+import random
 import uuid
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Query, Request
 from database import db
@@ -26,6 +27,8 @@ async def get_me(current_user: dict = Depends(get_current_user)):
 async def update_profile(data: ProfileUpdate, current_user: dict = Depends(get_current_user)):
     update = {k: v for k, v in data.model_dump().items() if v is not None}
     update.pop("location", None)
+    if data.is_insured is not None and current_user.get("role") != "contractor":
+        raise HTTPException(status_code=403, detail="Only contractors can update insurance status")
     if data.transportation is not None and data.transportation not in ("bike", "car", "suv_van", "truck", "bus", "rideshare", "other", ""):
         raise HTTPException(status_code=400, detail="Invalid transportation type")
     if data.portfolio is not None:
@@ -119,6 +122,10 @@ async def geocode_search(request: Request, q: str = Query(..., min_length=3, max
 async def search_crew(
     trade: Optional[str] = None,
     name: Optional[str] = None,
+    skill: Optional[str] = None,
+    transportation: Optional[str] = None,
+    state: Optional[str] = None,
+    min_rating: Optional[float] = Query(None, ge=0, le=5),
     lat: Optional[float] = None,
     lng: Optional[float] = None,
     radius: Optional[float] = 50,
@@ -131,22 +138,36 @@ async def search_crew(
         query["trade"] = {"$regex": re.escape(trade), "$options": "i"}
     if name:
         query["name"] = {"$regex": re.escape(name), "$options": "i"}
+    if skill:
+        query["skills"] = {"$regex": re.escape(skill), "$options": "i"}
+    if transportation:
+        query["transportation"] = transportation
+    if state:
+        query["location.state"] = {"$regex": re.escape(state), "$options": "i"}
+    if min_rating is not None:
+        query["rating"] = {"$gte": min_rating}
     if available_only:
         query["availability"] = True
 
     crew = await db.users.find(query, {"_id": 0, "password_hash": 0}).to_list(200)
-
     origin = valid_coords(lat, lng)
     radius = min(max(radius or 50, 1), 250)
     results = []
-    for c in crew:
-        dist = distance_between(origin, user_coords(c))
+    for member in crew:
+        dist = distance_between(origin, user_coords(member))
         if origin and (dist is None or dist > radius):
             continue
-        view = await build_user_view(c, current_user, include_coords=True)
+        view = await build_user_view(member, current_user, include_coords=True)
         view["distance_miles"] = round(dist, 1) if dist is not None else None
         results.append(view)
-    return results
+
+    # Randomly spotlight a small number of matching members without changing filters.
+    count = min(2, len(results))
+    featured_ids = set(random.sample([member["id"] for member in results], count)) if count else set()
+    for member in results:
+        member["search_featured"] = member["id"] in featured_ids
+    return ([member for member in results if member["search_featured"]] +
+            [member for member in results if not member["search_featured"]])
 
 
 @router.get("/crew/{user_id}")

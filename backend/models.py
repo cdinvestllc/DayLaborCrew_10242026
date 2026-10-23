@@ -63,6 +63,7 @@ class ProfileUpdate(BaseModel):
     state: Optional[str] = None
     portfolio: Optional[List[str]] = None
     certifications: Optional[List[Certification]] = Field(None, max_length=20)
+    is_insured: Optional[bool] = None
 
 
 class LocationUpdate(BaseModel):
