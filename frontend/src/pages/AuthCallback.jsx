@@ -27,7 +27,10 @@ export default function AuthCallback() {
 
     const exchange = async () => {
       try {
-        const res = await axios.post(`${API}/auth/google/callback`, { session_id: sessionId });
+        let requestedRole = "crew";
+        try { requestedRole = sessionStorage.getItem("google_signup_role") || "crew"; } catch { }
+        const res = await axios.post(`${API}/auth/google/callback`, { session_id: sessionId, role: requestedRole });
+        try { sessionStorage.removeItem("google_signup_role"); } catch { }
         const { user: userData } = res.data;
         window.history.replaceState(null, "", window.location.pathname);
         updateUser(userData);
@@ -38,6 +41,7 @@ export default function AuthCallback() {
         else if (["admin", "super_admin"].includes(userData.role)) navigate("/admin/dashboard", { replace: true });
         else navigate("/auth", { replace: true });
       } catch (err) {
+        try { sessionStorage.removeItem("google_signup_role"); } catch { }
         const reason = err?.response?.status === 403 ? "oauth_forbidden" : "oauth_failed";
         navigate(`/auth?error=${reason}`, { replace: true });
       }

@@ -62,6 +62,8 @@ export default function AuthPage() {
   }, []);
 
   const handleGoogleLogin = () => {
+    // Preserve role choice for first-time Google registration; existing accounts keep their stored role.
+    try { sessionStorage.setItem("google_signup_role", role); } catch { }
     // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
     const redirectUrl = window.location.origin + "/auth/callback";
     window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
@@ -305,8 +307,9 @@ export default function AuthPage() {
             <div className="flex-1 h-px bg-slate-200 dark:bg-slate-700" />
           </div>
 
+          {/* First-time Google signup uses this choice too; existing OAuth users retain their saved role. */}
           {/* Role Selector */}
-          {mode === "register" && (
+          {(mode === "register" || mode === "login") && (
             <div className="flex gap-3 mb-5">
               <button onClick={() => setRole("crew")}
                 className={`flex-1 flex flex-col items-center gap-1.5 p-3 rounded-xl border-2 font-bold text-sm transition-all ${role === "crew" ? "border-[#0000FF] bg-blue-50 dark:bg-blue-950 text-[#0000FF]" : "border-slate-200 dark:border-slate-700 text-slate-500 hover:border-slate-300"}`}
