@@ -6,6 +6,7 @@ import Navbar from "../components/Navbar";
 import MapComponent from "../components/MapComponent";
 import JobCard from "../components/JobCard";
 import DisputeModal from "../components/DisputeModal";
+import DisputeCenter from "../components/DisputeCenter";
 import { toast } from "sonner";
 import axios from "axios";
 import {
@@ -358,6 +359,7 @@ export default function ContractorDashboard() {
       {offerCrew && <OfferCrewModal crew={offerCrew} jobs={jobs} onClose={() => setOfferCrew(null)} />}
 
       <div className="max-w-[1400px] mx-auto px-4 py-4">
+        <DisputeCenter jobs={jobs} />
 
         {pollingEmergency && (
           <div className="mb-4 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 rounded-xl p-4 flex items-center gap-3" data-testid="polling-emergency-banner">

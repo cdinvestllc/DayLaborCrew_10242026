@@ -6,6 +6,7 @@ import Navbar from "../components/Navbar";
 import MapComponent, { haversine } from "../components/MapComponent";
 import JobCard from "../components/JobCard";
 import DisputeModal from "../components/DisputeModal";
+import DisputeCenter from "../components/DisputeCenter";
 import { toast } from "sonner";
 import axios from "axios";
 import {
@@ -640,6 +641,7 @@ export default function CrewDashboard() {
 
           {/* Sidebar */}
           <div className="space-y-4">
+            <DisputeCenter jobs={myJobs} />
             <div className="card p-4">
               <h3 className="font-bold text-[#050A30] dark:text-white text-sm mb-3" style={{ fontFamily: "Manrope, sans-serif" }}>{t("Your Stats")}</h3>
               <div className="grid grid-cols-2 gap-3">
