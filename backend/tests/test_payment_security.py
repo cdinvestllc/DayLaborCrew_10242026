@@ -22,7 +22,7 @@ from routes import payment_routes as payments  # noqa: E402
 
 
 def test_global_api_rate_limit_is_enabled():
-    assert limiter.default_limits
+    assert limiter._default_limits
 
 
 def test_test_mode_rejects_live_stripe_keys():
