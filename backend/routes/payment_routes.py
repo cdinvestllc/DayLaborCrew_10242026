@@ -2,6 +2,7 @@ import os
 import uuid
 import httpx
 import base64
+import asyncio
 import logging
 import stripe as stripe_sdk
 from datetime import datetime, timezone, timedelta
@@ -469,6 +470,29 @@ async def _fulfill_stripe_checkout_session(session: dict) -> None:
     ):
         logger.error("Stripe checkout amount/currency did not match its local transaction")
         raise HTTPException(status_code=400, detail="Payment does not match the recorded transaction")
+    if tx.get("payment_status") in {"cancelled", "canceled", "refunded"}:
+        if tx.get("payment_status") == "cancelled" and tx.get("plan") == "emergency_job":
+            payment_intent = session.get("payment_intent")
+            if isinstance(payment_intent, dict):
+                payment_intent = payment_intent.get("id")
+            if not payment_intent:
+                raise RuntimeError("Cancelled emergency payment is missing its payment intent")
+            try:
+                refund = await asyncio.to_thread(
+                    stripe_sdk.Refund.create,
+                    payment_intent=payment_intent,
+                    reason="requested_by_customer",
+                    api_key=_stripe_api_key(),
+                    idempotency_key=f"deleted-emergency-job-{session_id}",
+                )
+            except Exception as exc:
+                logger.error("Cancelled emergency payment refund failed: %s", type(exc).__name__)
+                raise RuntimeError("Cancelled emergency payment refund failed") from None
+            await db.payment_transactions.update_one(
+                {"session_id": session_id, "payment_status": "cancelled"},
+                {"$set": {"payment_status": "refunded", "provider_refund_id": refund.id,
+                          "refunded_at": now_str(), "updated_at": now_str()}})
+        return
     if tx.get("payment_status") == "paid":
         return
     plan = tx.get("plan")
@@ -1081,7 +1105,7 @@ async def emergency_fee():
 async def fulfill_emergency_tx(session_id: str) -> dict | None:
     """Publishes the emergency job exactly once for a paid, server-verified transaction."""
     tx = await db.payment_transactions.find_one_and_update(
-        {"session_id": session_id, "plan": "emergency_job", "payment_status": {"$ne": "paid"}},
+        {"session_id": session_id, "plan": "emergency_job", "payment_status": "pending"},
         {"$set": {"payment_status": "paid", "updated_at": now_str()}})
     if not tx:
         return None
@@ -1128,6 +1152,8 @@ async def emergency_status(session_id: str, current_user: dict = Depends(get_cur
         raise HTTPException(status_code=404, detail="Payment not found")
     if tx.get("payment_status") == "paid":
         return {"payment_status": "paid", "published": True, "job_id": tx["job_id"]}
+    if tx.get("payment_status") in {"cancelled", "canceled", "refunded", "expired"}:
+        return {"payment_status": tx["payment_status"], "published": False, "job_id": tx.get("job_id")}
     stripe = StripeCheckout(api_key=_stripe_api_key(), webhook_url="")
     status = await stripe.get_checkout_status(session_id)
     if status.payment_status == "paid" and status.metadata.get("job_id") == tx["job_id"]:
