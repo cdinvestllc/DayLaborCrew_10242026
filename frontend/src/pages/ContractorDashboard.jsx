@@ -5,6 +5,8 @@ import { useSearchParams } from "react-router-dom";
 import Navbar from "../components/Navbar";
 import MapComponent from "../components/MapComponent";
 import JobCard from "../components/JobCard";
+import DisputeModal from "../components/DisputeModal";
+import DisputeCenter from "../components/DisputeCenter";
 import { toast } from "sonner";
 import axios from "axios";
 import {
@@ -32,7 +34,7 @@ function RatingModal({ job, onClose, onSubmit }) {
       <div className="card max-w-md w-full p-6 relative">
         <button onClick={onClose} className="absolute top-4 right-4 text-slate-400"><X className="w-5 h-5" /></button>
         <h2 className="font-extrabold text-[#050A30] dark:text-white text-xl mb-4" style={{ fontFamily: "Manrope, sans-serif" }}>Rate Workers</h2>
-        {job.crew_accepted?.map(crewId => (
+        {(job.crew_accepted || []).filter(crewId => !(job.rated_crew || []).includes(crewId)).map(crewId => (
           <div key={crewId} className="mb-4 p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
             <p className="text-sm font-semibold mb-2">Worker ID: {crewId.slice(0, 8)}...</p>
             <div className="flex gap-1 mb-2">
@@ -61,9 +63,11 @@ export default function ContractorDashboard() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [jobs, setJobs] = useState([]);
   const [crew, setCrew] = useState([]);
-  const [crewSearch, setCrewSearch] = useState({ name: "", trade: "" });
+  const [crewSearch, setCrewSearch] = useState({ name: "", trade: "", skill: "", transportation: "", min_rating: "", state: "" });
+  const [crewTradeOptions, setCrewTradeOptions] = useState(TRADES);
   const [showJobForm, setShowJobForm] = useState(false);
   const [ratingJob, setRatingJob] = useState(null);
+  const [disputeJob, setDisputeJob] = useState(null);
   const [offerCrew, setOfferCrew] = useState(null);
   const [loading, setLoading] = useState(true);
   // Start from the saved business location; browser geolocation refines it if allowed
@@ -96,10 +100,21 @@ export default function ContractorDashboard() {
       const params = new URLSearchParams();
       if (crewSearch.name) params.append("name", crewSearch.name);
       if (crewSearch.trade) params.append("trade", crewSearch.trade);
+      if (crewSearch.skill) params.append("skill", crewSearch.skill);
+      if (crewSearch.transportation) params.append("transportation", crewSearch.transportation);
+      if (crewSearch.min_rating) params.append("min_rating", crewSearch.min_rating);
+      if (crewSearch.state) params.append("state", crewSearch.state);
       const res = await axios.get(`${API}/users/crew?${params}`);
       setCrew(res.data);
     } catch (e) { console.error(e); }
   }, [crewSearch]);
+
+  useEffect(() => {
+    axios.get(`${API}/public/trades`).then(res => {
+      const names = (res.data || []).filter(t => t?.name && t.is_active !== false).map(t => t.name);
+      if (names.length) setCrewTradeOptions(names);
+    }).catch(() => {});
+  }, []);
 
   useEffect(() => {
     const init = async () => {
@@ -278,6 +293,15 @@ export default function ContractorDashboard() {
     } catch (e) { toast.error(e?.response?.data?.detail || "Failed to cancel job"); }
   };
 
+  const archiveJob = async (jobId) => {
+    if (!window.confirm("Archive this cancelled job?")) return;
+    try {
+      await axios.post(`${API}/jobs/${jobId}/archive`);
+      setJobs(prev => prev.filter(job => job.id !== jobId));
+      toast.success("Job archived");
+    } catch (e) { toast.error(e?.response?.data?.detail || "Failed to archive job"); }
+  };
+
   const suspendJob = async (jobId) => {
     try {
       const res = await axios.post(`${API}/jobs/${jobId}/suspend`);
@@ -298,8 +322,13 @@ export default function ContractorDashboard() {
           await axios.post(`${API}/jobs/${job.id}/rate`, { rated_id: crewId, job_id: job.id, stars, review: reviews[crewId] || "" });
         }
       }
-      toast.success("Ratings submitted!"); setRatingJob(null);
-    } catch { toast.error("Failed to submit ratings"); }
+      toast.success("Ratings submitted!");
+    } catch (error) {
+      toast.error(error?.response?.data?.detail || "Some ratings could not be submitted");
+    } finally {
+      setRatingJob(null);
+      fetchJobs();
+    }
   };
 
   const saveFavorite = async (crewId) => {
@@ -325,9 +354,12 @@ export default function ContractorDashboard() {
       <Navbar />
       {boostJob && <BoostJobModal job={boostJob} onClose={() => setBoostJob(null)} onSuccess={() => { setBoostJob(null); fetchJobs(); }} />}
       {ratingJob && <RatingModal job={ratingJob} onClose={() => setRatingJob(null)} onSubmit={submitRatings} />}
+      {disputeJob && <DisputeModal job={disputeJob.job} initialType={disputeJob.initialType} currentUser={user}
+        onClose={() => setDisputeJob(null)} onSubmitted={() => { setDisputeJob(null); fetchJobs(); }} />}
       {offerCrew && <OfferCrewModal crew={offerCrew} jobs={jobs} onClose={() => setOfferCrew(null)} />}
 
       <div className="max-w-[1400px] mx-auto px-4 py-4">
+        <DisputeCenter jobs={jobs} />
 
         {pollingEmergency && (
           <div className="mb-4 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 rounded-xl p-4 flex items-center gap-3" data-testid="polling-emergency-banner">
@@ -422,8 +454,34 @@ export default function ContractorDashboard() {
                   className="w-full border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#0000FF] dark:bg-slate-800 dark:text-white"
                   data-testid="crew-search-trade">
                   <option value="">All Trades</option>
-                  {TRADES.map(t => <option key={t} value={t.toLowerCase()}>{t}</option>)}
+                  {crewTradeOptions.map(t => <option key={t} value={t.toLowerCase()}>{t}</option>)}
                 </select>
+                <select value={crewSearch.skill} onChange={e => setCrewSearch(s => ({ ...s, skill: e.target.value }))}
+                  className="w-full border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 text-sm dark:bg-slate-800 dark:text-white"
+                  data-testid="crew-search-skill">
+                  <option value="">Any Skill</option>
+                  {crewTradeOptions.map(t => <option key={t} value={t}>{t}</option>)}
+                </select>
+                <select value={crewSearch.transportation} onChange={e => setCrewSearch(s => ({ ...s, transportation: e.target.value }))}
+                  className="w-full border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 text-sm dark:bg-slate-800 dark:text-white"
+                  data-testid="crew-search-transportation">
+                  <option value="">Any Transportation</option>
+                  <option value="bike">Bike</option><option value="car">Car</option><option value="suv_van">SUV / Van</option>
+                  <option value="truck">Truck</option><option value="bus">Bus</option><option value="rideshare">Rideshare</option><option value="other">Other</option>
+                </select>
+                <select value={crewSearch.min_rating} onChange={e => setCrewSearch(s => ({ ...s, min_rating: e.target.value }))}
+                  className="w-full border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 text-sm dark:bg-slate-800 dark:text-white"
+                  data-testid="crew-search-rating">
+                  <option value="">Any Rating</option><option value="3">3+ stars</option><option value="4">4+ stars</option><option value="4.5">4.5+ stars</option>
+                </select>
+                <select value={crewSearch.state} onChange={e => setCrewSearch(s => ({ ...s, state: e.target.value }))}
+                  className="w-full border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 text-sm dark:bg-slate-800 dark:text-white"
+                  data-testid="crew-search-state">
+                  <option value="">Any State</option>
+                  {US_STATES.map(s => <option key={s.abbr} value={s.name}>{s.name}</option>)}
+                </select>
+                <button type="button" onClick={() => setCrewSearch({ name: "", trade: "", skill: "", transportation: "", min_rating: "", state: "" })}
+                  className="text-xs font-semibold text-[#0000FF] hover:underline justify-self-start" data-testid="reset-crew-filters">Reset filters</button>
               </div>
             </div>
 
@@ -447,6 +505,7 @@ export default function ContractorDashboard() {
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-semibold text-[#050A30] dark:text-white truncate">{member.name}</p>
+                      {member.search_featured && <span className="inline-flex mt-0.5 px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px] font-bold" data-testid={`featured-crew-${member.id}`}>FEATURED</span>}
                       <p className="text-xs text-slate-500 capitalize">{member.trade || "General"}</p>
                     </div>
                     <div className="flex flex-col items-end gap-1">
@@ -464,8 +523,8 @@ export default function ContractorDashboard() {
                           title="Offer Job">
                           Offer
                         </button>
-                        <a href={`/profile/${member.id}`}
-                          className="text-slate-500 hover:text-slate-700 text-xs font-semibold underline"
+                        <a href={`/profile/${member.id}`} target="_blank" rel="noopener noreferrer"
+                          className="inline-flex items-center px-2 py-1 text-xs font-semibold text-[#0000FF] bg-blue-50 border border-blue-200 rounded hover:bg-blue-100 transition-colors"
                           data-testid={`view-profile-crew-${member.id}`}
                           title="View Profile">
                           Profile
@@ -519,7 +578,9 @@ export default function ContractorDashboard() {
                 </div>
               ) : jobs.map(job => (
                 <div key={job.id}>
-                  <JobCard job={job} onStart={startJob} onVerify={verifyJob} onRate={setRatingJob} currentUser={user} />
+                  <JobCard job={job} onStart={startJob} onVerify={verifyJob} onRate={setRatingJob}
+                    onReportDispute={(targetJob, initialType) => setDisputeJob({ job: targetJob, initialType })}
+                    currentUser={user} />
                   {job.status === "pending_payment" && (
                     <div className="flex gap-2 mt-1 px-1" data-testid={`pending-payment-actions-${job.id}`}>
                       <button onClick={() => startEmergencyCheckout(job.id)} disabled={payingJobId === job.id}
@@ -532,6 +593,15 @@ export default function ContractorDashboard() {
                         className="flex-1 flex items-center justify-center gap-1 py-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-700"
                         data-testid={`delete-pending-${job.id}`}>
                         <XCircle className="w-3.5 h-3.5" /> Delete
+                      </button>
+                    </div>
+                  )}
+                  {job.status === "cancelled" && (
+                    <div className="mt-1 px-1">
+                      <button onClick={() => archiveJob(job.id)}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 rounded-lg border border-slate-200 hover:bg-slate-200"
+                        data-testid={`archive-job-${job.id}`}>
+                        Archive
                       </button>
                     </div>
                   )}

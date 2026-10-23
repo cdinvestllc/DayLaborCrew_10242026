@@ -37,6 +37,13 @@ def trial_end(days: int = 30) -> str:
     return (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
 
 
+def oauth_signup_role(value) -> str:
+    """Validate a role choice for new Google registrations only."""
+    if not isinstance(value, str) or value not in PUBLIC_ROLES:
+        raise HTTPException(status_code=400, detail="Role must be crew or contractor")
+    return value
+
+
 def session_body(token: str, user: dict) -> dict:
     from auth import session_csrf
     return {"access_token": token, "token_type": "bearer", "user": user_to_response(user), "csrf_token": session_csrf(token)}
@@ -283,6 +290,7 @@ async def google_oauth_callback(request: Request, response: Response):
     except ValueError:
         body = None
     session_id = body.get("session_id") if isinstance(body, dict) else None
+    requested_role = oauth_signup_role(body.get("role", "crew") if isinstance(body, dict) else "crew")
     if not isinstance(session_id, str) or not 8 <= len(session_id) <= 512:
         raise HTTPException(status_code=400, detail="session_id required")
 
@@ -299,7 +307,7 @@ async def google_oauth_callback(request: Request, response: Response):
             "id": str(uuid.uuid4()),
             "email": email,
             "password_hash": None,
-            "role": "crew",
+            "role": requested_role,
             "name": name,
             "phone": None,
             "is_active": True,
@@ -332,8 +340,8 @@ async def google_oauth_callback(request: Request, response: Response):
             "token_version": 0,
         }
         await db.users.insert_one(user)
-        log_security_event("register", request, user=user["id"], role="crew", provider="google")
-        await send_welcome_email(name, email, "crew")
+        log_security_event("register", request, user=user["id"], role=requested_role, provider="google")
+        await send_welcome_email(name, email, requested_role)
     else:
         if user.get("role") in PRIVILEGED_ROLES:
             log_security_event("oauth_privileged_blocked", request, user=user["id"])
@@ -367,5 +375,31 @@ async def convert_to_contractor(request: Request, response: Response, current_us
         "$inc": {"token_version": 1}})
     user = await db.users.find_one({"id": current_user["id"]}, {"_id": 0})
     log_security_event("role_converted", request, user=user["id"], role="contractor")
+    token = issue_session(response, user)
+    return session_body(token, user)
+
+
+
+@router.post("/convert-to-crew")
+async def convert_to_crew(request: Request, response: Response, current_user: dict = Depends(get_current_user)):
+    """Switch a contractor to a crew-only account after active contractor jobs are closed."""
+    if current_user.get("role") != "contractor":
+        raise HTTPException(status_code=400, detail="Only contractor accounts can convert to crew")
+    active_jobs = await db.jobs.count_documents({
+        "contractor_id": current_user["id"],
+        "status": {"$in": ["pending_payment", "open", "fulfilled", "suspended", "in_progress", "completed_pending_review"]},
+        "archived_at": {"$exists": False},
+    })
+    if active_jobs:
+        raise HTTPException(status_code=400, detail="Close or cancel and archive your active jobs before converting")
+    now = datetime.now(timezone.utc).isoformat()
+    result = await db.users.update_one(
+        {"id": current_user["id"], "role": "contractor"},
+        {"$set": {"role": "crew", "company_name": "", "converted_from_contractor_at": now},
+         "$inc": {"token_version": 1}})
+    if result.modified_count != 1:
+        raise HTTPException(status_code=409, detail="Account role changed. Refresh and try again.")
+    user = await db.users.find_one({"id": current_user["id"]}, {"_id": 0})
+    log_security_event("role_converted", request, user=user["id"], role="crew")
     token = issue_session(response, user)
     return session_body(token, user)

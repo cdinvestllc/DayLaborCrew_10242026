@@ -2,7 +2,13 @@ import os
 import uuid
 import json
 import logging
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+try:
+    from emergentintegrations.llm.chat import LlmChat, UserMessage
+except ImportError:
+    # This optional vendor client is not published on public PyPI. Ranking remains
+    # deterministic and rule-based when the client is unavailable.
+    LlmChat = None
+    UserMessage = None
 from utils.geocoding import distance_between, valid_coords
 from utils.profile_view import user_coords
 

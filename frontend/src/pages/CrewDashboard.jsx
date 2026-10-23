@@ -5,6 +5,8 @@ import { useWebSocket } from "../contexts/WebSocketContext";
 import Navbar from "../components/Navbar";
 import MapComponent, { haversine } from "../components/MapComponent";
 import JobCard from "../components/JobCard";
+import DisputeModal from "../components/DisputeModal";
+import DisputeCenter from "../components/DisputeCenter";
 import { toast } from "sonner";
 import axios from "axios";
 import {
@@ -33,7 +35,7 @@ const TRANSPORT_OPTIONS = [
   { value: "other", label: "Other" },
 ];
 
-const DISTANCE_OPTIONS = [5, 10, 20, 50, 100];
+const DISTANCE_OPTIONS = [5, 10, 20, 25, 50, 100];
 
 // ─── Push Notification Subscription Widget ────────────────────────────────────
 function PushNotifyWidget() {
@@ -124,6 +126,38 @@ function PushNotifyWidget() {
   );
 }
 
+function CrewRatingModal({ job, onClose, onSubmit }) {
+  const [stars, setStars] = useState(0);
+  const [review, setReview] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const submit = async () => {
+    if (!stars) { toast.error("Choose a star rating first."); return; }
+    if (review.length > 1000) { toast.error("Review must be at most 1,000 characters."); return; }
+    setSubmitting(true);
+    try { await onSubmit(job, stars, review.trim()); }
+    finally { setSubmitting(false); }
+  };
+  return <div className="fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-4" onClick={onClose}>
+    <div className="card w-full max-w-md p-6" onClick={e => e.stopPropagation()} data-testid="crew-rating-modal">
+      <div className="flex items-start justify-between mb-3"><div><h2 className="text-lg font-extrabold text-[#050A30] dark:text-white">Rate Contractor</h2><p className="text-sm text-slate-500">{job.title}</p></div>
+        <button onClick={onClose} aria-label="Close rating form" className="text-slate-400"><X className="w-5 h-5" /></button></div>
+      <p className="text-sm font-semibold mb-2">How was your experience working with {job.contractor_name || "this contractor"}?</p>
+      <div className="flex gap-2 mb-4" role="radiogroup" aria-label="Rating stars">
+        {[1,2,3,4,5].map(value => <button key={value} type="button" onClick={() => setStars(value)}
+          aria-label={`${value} star${value === 1 ? "" : "s"}`} aria-pressed={stars === value}
+          className={`text-3xl ${stars >= value ? "text-amber-400" : "text-slate-300"}`} data-testid={`crew-rating-star-${value}`}>★</button>)}
+      </div>
+      <label className="block text-sm font-semibold">Review (optional)
+        <textarea rows={4} maxLength={1000} value={review} onChange={e => setReview(e.target.value)}
+          className="mt-1 w-full border rounded-lg p-3 text-sm dark:bg-slate-800" placeholder="Share constructive feedback." data-testid="crew-rating-review" />
+        <span className="block text-xs text-slate-400 text-right">{review.length}/1000</span>
+      </label>
+      <div className="flex gap-3 mt-5"><button onClick={onClose} className="flex-1 border rounded-lg py-2.5 font-semibold">Cancel</button>
+        <button onClick={submit} disabled={submitting || !stars} className="flex-1 bg-[#0000FF] text-white rounded-lg py-2.5 font-bold disabled:opacity-60" data-testid="submit-contractor-rating">{submitting ? "Submitting…" : "Submit Rating"}</button></div>
+    </div>
+  </div>;
+}
+
 export default function CrewDashboard() {
   const { user, refreshUser, updateUser } = useAuth();
   const { t } = useLanguage();
@@ -131,6 +165,10 @@ export default function CrewDashboard() {
   const [view, setView] = useState("map");
   const [jobs, setJobs] = useState([]);
   const [myJobs, setMyJobs] = useState([]);
+  const [disputeJob, setDisputeJob] = useState(null);
+  const [ratingJob, setRatingJob] = useState(null);
+  const [clockInStatuses, setClockInStatuses] = useState({});
+  const [clockingInJobs, setClockingInJobs] = useState({});
   // Start from the saved profile location; browser geolocation refines it if allowed
   const [userLocation, setUserLocation] = useState(() =>
     user?.location?.lat != null && user?.location?.lng != null ? { lat: user.location.lat, lng: user.location.lng } : null);
@@ -138,7 +176,7 @@ export default function CrewDashboard() {
   const [tradeFilter, setTradeFilter] = useState("All");
   const [trades, setTrades] = useState(["All"]);
   const [radius, setRadius] = useState(25);
-  const [distanceFilter, setDistanceFilter] = useState(null);
+  const [searchCenter, setSearchCenter] = useState(null);
   const [smartMatch, setSmartMatch] = useState(false);
   const [selectedJob, setSelectedJob] = useState(null);
   const [trialInfo, setTrialInfo] = useState(null);
@@ -154,9 +192,10 @@ export default function CrewDashboard() {
     try {
       const params = new URLSearchParams();
       if (tradeFilter !== "All") params.append("trade", tradeFilter.toLowerCase());
-      if (userLocation) {
-        params.append("lat", userLocation.lat);
-        params.append("lng", userLocation.lng);
+      const origin = searchCenter || userLocation;
+      if (origin && radius !== null) {
+        params.append("lat", origin.lat);
+        params.append("lng", origin.lng);
         params.append("radius", radius);
       }
       if (smartMatch) params.append("smart_match", "true");
@@ -165,14 +204,23 @@ export default function CrewDashboard() {
     } catch (e) {
       console.error("Failed to fetch jobs", e);
     }
-  }, [tradeFilter, userLocation, radius, smartMatch]);
+  }, [tradeFilter, userLocation, searchCenter, radius, smartMatch]);
 
   const fetchMyJobs = useCallback(async () => {
     try {
       const res = await axios.get(`${API}/jobs/my-jobs`);
-      setMyJobs(res.data);
+      const ownedJobs = res.data || [];
+      setMyJobs(ownedJobs);
+      const activeJobs = ownedJobs.filter(job => job.status === "in_progress" && job.crew_accepted?.includes(user?.id));
+      const statuses = await Promise.all(activeJobs.map(async job => {
+        try {
+          const status = await axios.get(`${API}/jobs/${job.id}/clock-in/me`);
+          return [job.id, status.data.clocked_in === true];
+        } catch { return [job.id, false]; }
+      }));
+      setClockInStatuses(previous => ({ ...previous, ...Object.fromEntries(statuses) }));
     } catch (e) { console.error(e); }
-  }, []);
+  }, [user?.id]);
 
   const fetchTrialInfo = useCallback(async () => {
     try {
@@ -269,6 +317,46 @@ export default function CrewDashboard() {
     } catch { toast.error("Failed to update transportation"); }
   };
 
+  const clockInJob = async (jobId) => {
+    if (!navigator.geolocation) {
+      toast.error("This browser does not support location verification. Contact the contractor for help.");
+      return;
+    }
+    setClockingInJobs(previous => ({ ...previous, [jobId]: true }));
+    navigator.geolocation.getCurrentPosition(async position => {
+      try {
+        const response = await axios.post(`${API}/jobs/${jobId}/clock-in`, {
+          lat: position.coords.latitude,
+          lng: position.coords.longitude,
+          accuracy_meters: Number.isFinite(position.coords.accuracy) ? position.coords.accuracy : null
+        });
+        setClockInStatuses(previous => ({ ...previous, [jobId]: true }));
+        toast.success(response.data.already_clocked_in ? "You are already clocked in." : "Clock-in verified and recorded.");
+      } catch (error) {
+        toast.error(error?.response?.data?.detail || "Could not verify your location for clock-in.");
+      } finally {
+        setClockingInJobs(previous => ({ ...previous, [jobId]: false }));
+      }
+    }, () => {
+      setClockingInJobs(previous => ({ ...previous, [jobId]: false }));
+      toast.error("Location permission is required to clock in. Allow location access and try again.");
+    }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+  };
+
+  const submitContractorRating = async (job, stars, review) => {
+    try {
+      await axios.post(`${API}/jobs/${job.id}/rate`, {
+        rated_id: job.contractor_id, job_id: job.id, stars, review
+      });
+      toast.success("Rating submitted!");
+      setRatingJob(null);
+      fetchMyJobs();
+      refreshUser();
+    } catch (error) {
+      toast.error(error?.response?.data?.detail || "Could not submit rating");
+    }
+  };
+
   const completeJob = async (jobId) => {
     try {
       await axios.post(`${API}/jobs/${jobId}/complete`);
@@ -282,15 +370,21 @@ export default function CrewDashboard() {
 
   const handleUseMyLocation = () => {
     setGettingLocation(true);
+    if (!navigator.geolocation) {
+      toast.error(t("Location access is not supported by this browser"));
+      setGettingLocation(false);
+      return;
+    }
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         const loc = { lat: pos.coords.latitude, lng: pos.coords.longitude };
         setUserLocation(loc);
+        setSearchCenter(null);
+        setSelectedState("");
         setFlyToCoords([pos.coords.longitude, pos.coords.latitude]);
         sendLocation(loc.lat, loc.lng);
         setGettingLocation(false);
         toast.success(t("Location updated!"));
-        fetchJobs();
       },
       () => { toast.error(t("Location access denied")); setGettingLocation(false); }
     );
@@ -299,9 +393,16 @@ export default function CrewDashboard() {
   const handleStateChange = (e) => {
     const abbr = e.target.value;
     setSelectedState(abbr);
-    if (!abbr) return;
+    if (!abbr) {
+      setSearchCenter(null);
+      setFlyToCoords(userLocation ? [userLocation.lng, userLocation.lat] : [-95.7129, 37.0902]);
+      return;
+    }
     const st = US_STATES.find(s => s.abbr === abbr);
-    if (st) setFlyToCoords([st.lng, st.lat]);
+    if (st) {
+      setSearchCenter({ lat: st.lat, lng: st.lng });
+      setFlyToCoords([st.lng, st.lat]);
+    }
   };
 
   const shareJob = (job) => {
@@ -312,8 +413,10 @@ export default function CrewDashboard() {
   const acceptedIds = myJobs.map(j => j.id);
 
   // Filter jobs by distance for display
-  const visibleJobs = distanceFilter && userLocation
-    ? jobs.filter(j => j.location?.lat && haversine(userLocation.lat, userLocation.lng, j.location.lat, j.location.lng) <= distanceFilter)
+  const activeSearchCenter = searchCenter || userLocation;
+  const visibleJobs = radius !== null && activeSearchCenter
+    ? jobs.filter(j => j.location?.lat != null && j.location?.lng != null &&
+        haversine(activeSearchCenter.lat, activeSearchCenter.lng, j.location.lat, j.location.lng) <= radius)
     : jobs;
 
   return (
@@ -435,10 +538,11 @@ export default function CrewDashboard() {
           </button>
 
           <select
-            value={distanceFilter || ""}
-            onChange={e => setDistanceFilter(e.target.value ? Number(e.target.value) : null)}
+            value={radius === null ? "" : String(radius)}
+            onChange={e => setRadius(e.target.value ? Number(e.target.value) : null)}
             className="px-3 py-1.5 rounded-lg text-xs font-semibold border bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700 focus:outline-none"
             data-testid="distance-filter"
+            aria-label="Search radius in miles"
           >
             <option value="">{t("Any Distance")}</option>
             {DISTANCE_OPTIONS.map(d => <option key={d} value={d}>{d} miles</option>)}
@@ -457,17 +561,9 @@ export default function CrewDashboard() {
               {t}
             </button>
           ))}
-          <select
-            value={radius}
-            onChange={e => setRadius(Number(e.target.value))}
-            className="px-3 py-1.5 rounded-full text-xs font-semibold border bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700"
-            data-testid="radius-select"
-          >
-            <option value={10}>10 mi radius</option>
-            <option value={25}>25 mi radius</option>
-            <option value={50}>50 mi radius</option>
-            <option value={100}>100 mi radius</option>
-          </select>
+          <span className="px-3 py-1.5 rounded-full text-xs font-semibold bg-blue-50 text-blue-800 border border-blue-100" data-testid="radius-indicator">
+            Map radius: {radius === null ? "Any distance" : `${radius} miles`}
+          </span>
           <button onClick={fetchJobs} className="px-3 py-1.5 rounded-full text-xs font-semibold border bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700 hover:bg-slate-50 flex items-center gap-1" data-testid="refresh-btn">
             <RefreshCw className="w-3 h-3" /> Refresh
           </button>
@@ -482,8 +578,19 @@ export default function CrewDashboard() {
                 userLocation={userLocation}
                 onJobClick={setSelectedJob}
                 height="500px"
-                distanceFilter={distanceFilter}
+                distanceFilter={radius}
+                searchCenter={searchCenter}
+                onCenterUser={(loc) => {
+                  if (loc) {
+                    setUserLocation(loc);
+                    sendLocation(loc.lat, loc.lng);
+                    setFlyToCoords([loc.lng, loc.lat]);
+                  }
+                  setSearchCenter(null);
+                  setSelectedState("");
+                }}
                 flyToCoords={flyToCoords}
+                flyToZoom={searchCenter ? 6 : userLocation ? 13 : 4}
               />
             ) : (
               <div className="space-y-3 max-h-[600px] overflow-y-auto pr-1">
@@ -518,7 +625,7 @@ export default function CrewDashboard() {
                           <Share2 className="w-3 h-3" /> Share
                         </button>
                         {job.contractor_id && (
-                          <a href={`/profile/${job.contractor_id}`}
+                          <a href={`/profile/${job.contractor_id}`} target="_blank" rel="noopener noreferrer"
                             className="flex items-center gap-1 text-xs text-[#0000FF] font-semibold hover:underline"
                             data-testid={`view-contractor-${job.id}`}>
                             View Contractor
@@ -534,6 +641,7 @@ export default function CrewDashboard() {
 
           {/* Sidebar */}
           <div className="space-y-4">
+            <DisputeCenter jobs={myJobs} />
             <div className="card p-4">
               <h3 className="font-bold text-[#050A30] dark:text-white text-sm mb-3" style={{ fontFamily: "Manrope, sans-serif" }}>{t("Your Stats")}</h3>
               <div className="grid grid-cols-2 gap-3">
@@ -557,13 +665,16 @@ export default function CrewDashboard() {
             </div>
 
             <div className="card p-4">
-              <h3 className="font-bold text-[#050A30] dark:text-white text-sm mb-3" style={{ fontFamily: "Manrope, sans-serif" }}>{t("My Active Jobs")}</h3>
-              {myJobs.filter(j => ["in_progress", "fulfilled", "open"].includes(j.status)).length === 0 ? (
+              <h3 className="font-bold text-[#050A30] dark:text-white text-sm mb-3" style={{ fontFamily: "Manrope, sans-serif" }}>{t("My Jobs & Reviews")}</h3>
+              {myJobs.filter(j => ["in_progress", "fulfilled", "open", "completed_pending_review", "completed"].includes(j.status)).length === 0 ? (
                 <p className="text-slate-400 text-sm">{t("No active jobs. Accept a job to get started!")}</p>
               ) : (
                 <div className="space-y-2">
-                  {myJobs.filter(j => ["in_progress", "fulfilled", "open"].includes(j.status)).map(job => (
-                    <JobCard key={job.id} job={job} onComplete={completeJob} currentUser={user} isAccepted={true} />
+                  {myJobs.filter(j => ["in_progress", "fulfilled", "open", "completed_pending_review", "completed"].includes(j.status)).map(job => (
+                    <JobCard key={job.id} job={job} onComplete={completeJob} onClockIn={clockInJob}
+                      clockedIn={clockInStatuses[job.id] === true} clockingIn={clockingInJobs[job.id] === true}
+                      onReportDispute={(targetJob, initialType) => setDisputeJob({ job: targetJob, initialType })}
+                      onRate={setRatingJob} currentUser={user} isAccepted={true} />
                   ))}
                 </div>
               )}
@@ -582,6 +693,10 @@ export default function CrewDashboard() {
         </div>
 
         {/* Job Detail Modal */}
+        {disputeJob && <DisputeModal job={disputeJob.job} initialType={disputeJob.initialType} currentUser={user}
+          onClose={() => setDisputeJob(null)} onSubmitted={() => { setDisputeJob(null); fetchMyJobs(); }} />}
+        {ratingJob && <CrewRatingModal job={ratingJob} onClose={() => setRatingJob(null)} onSubmit={submitContractorRating} />}
+
         {selectedJob && (
           <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setSelectedJob(null)}>
             <div className="card max-w-md w-full p-6 relative" onClick={e => e.stopPropagation()}>

@@ -141,6 +141,11 @@ export default function PublicProfilePage() {
                   </h1>
                   <p className="text-[#0000FF] font-semibold capitalize text-sm">{profile.trade || profile.role}</p>
                   <span className="inline-block mt-1 px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 dark:bg-slate-800 text-slate-500 capitalize">{profile.role}</span>
+                  {profile.role === "contractor" && profile.is_insured && (
+                    <span className="inline-flex items-center gap-1 mt-1 ml-1 px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-xs font-bold" title="Self-reported insurance status" data-testid="insured-badge">
+                      <Shield className="w-3 h-3" /> Insured
+                    </span>
+                  )}
                 </div>
                 <div className="flex gap-2">
                   <button onClick={copyProfileLink}
@@ -219,12 +224,11 @@ export default function PublicProfilePage() {
             <h3 className="font-bold text-[#050A30] dark:text-white mb-3" style={{ fontFamily: "Manrope, sans-serif" }}>
               Portfolio ({profile.portfolio.length} photos)
             </h3>
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+            <div className="flex gap-3 overflow-x-auto snap-x snap-mandatory pb-3" role="region" aria-label="Portfolio images" data-testid="public-portfolio-carousel">
               {profile.portfolio.map((url, i) => (
-                <a key={i} href={resolveImageUrl(url)} target="_blank" rel="noreferrer"
-                  className="aspect-square rounded-xl overflow-hidden bg-slate-100 dark:bg-slate-800 hover:opacity-90 transition-opacity">
-                  <SafeImage src={resolveImageUrl(url)} alt={`Work ${i + 1}`}
-                    className="w-full h-full object-cover" />
+                <a key={i} href={resolveImageUrl(url)} target="_blank" rel="noopener noreferrer"
+                  className="flex-none w-56 sm:w-64 aspect-square snap-start rounded-xl overflow-hidden bg-slate-100 dark:bg-slate-800 hover:opacity-90 transition-opacity">
+                  <SafeImage src={resolveImageUrl(url)} alt={`Work ${i + 1}`} className="w-full h-full object-cover" />
                 </a>
               ))}
             </div>

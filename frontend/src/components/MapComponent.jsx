@@ -31,6 +31,46 @@ function haversine(lat1, lng1, lat2, lng2) {
 }
 export { haversine };
 
+export function createRadiusGeoJSON(centerLngLat, radiusMiles, steps = 64) {
+  const empty = { type: "FeatureCollection", features: [] };
+  if (!Array.isArray(centerLngLat) || centerLngLat.length < 2 ||
+      !Number.isFinite(centerLngLat[0]) || !Number.isFinite(centerLngLat[1]) ||
+      !Number.isFinite(radiusMiles) || radiusMiles <= 0) return empty;
+  const [lng, lat] = centerLngLat;
+  const angular = radiusMiles / 3959;
+  const lat1 = lat * Math.PI / 180;
+  const lon1 = lng * Math.PI / 180;
+  const count = Math.max(8, Math.floor(steps));
+  const coordinates = [];
+  for (let i = 0; i <= count; i++) {
+    const bearing = 2 * Math.PI * i / count;
+    const lat2 = Math.asin(Math.sin(lat1) * Math.cos(angular) +
+      Math.cos(lat1) * Math.sin(angular) * Math.cos(bearing));
+    const lon2 = lon1 + Math.atan2(
+      Math.sin(bearing) * Math.sin(angular) * Math.cos(lat1),
+      Math.cos(angular) - Math.sin(lat1) * Math.sin(lat2));
+    coordinates.push([lon2 * 180 / Math.PI, lat2 * 180 / Math.PI]);
+  }
+  return {
+    type: "FeatureCollection",
+    features: [{
+      type: "Feature",
+      properties: { radius_miles: radiusMiles },
+      geometry: { type: "Polygon", coordinates: [coordinates] }
+    }]
+  };
+}
+
+// MapLibre owns the outer marker's transform; hover effects must stay on a child.
+export function createStableJobMarker(size, color) {
+  const anchor = el("div", `width:${size}px;height:${size}px;display:flex;align-items:center;justify-content:center;cursor:pointer`);
+  const visual = el("div", `width:${size}px;height:${size}px;background:${color};border-radius:50% 50% 50% 0;transform:rotate(-45deg);border:3px solid white;box-shadow:0 3px 10px rgba(0,0,0,0.35);transition:transform 0.15s`);
+  anchor.appendChild(visual);
+  anchor.addEventListener("mouseenter", () => { visual.style.transform = "rotate(-45deg) scale(1.2)"; });
+  anchor.addEventListener("mouseleave", () => { visual.style.transform = "rotate(-45deg) scale(1)"; });
+  return anchor;
+}
+
 // DOM helpers: popups are built with textContent, never innerHTML, so user data can't inject markup
 function el(tag, style = "", text = null) {
   const node = document.createElement(tag);
@@ -110,7 +150,10 @@ export default function MapComponent({
   onJobClick,
   height = "500px",
   distanceFilter = null,
+  searchCenter = null,
+  onCenterUser = null,
   flyToCoords = null,
+  flyToZoom = 13,
   showOnlyContractorJobs = false,
   onCrewOffer = null,
 }) {
@@ -124,14 +167,19 @@ export default function MapComponent({
   const centerOnUser = useCallback(() => {
     if (!mapRef.current) return;
     if (toLngLat(userLocation)) {
+      onCenterUser?.(userLocation);
       mapRef.current.flyTo({ center: toLngLat(userLocation), zoom: 12, speed: 1.5 });
     } else if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
-        (pos) => mapRef.current?.flyTo({ center: [pos.coords.longitude, pos.coords.latitude], zoom: 12, speed: 1.5 }),
+        (pos) => {
+          const location = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+          onCenterUser?.(location);
+          mapRef.current?.flyTo({ center: [location.lng, location.lat], zoom: 12, speed: 1.5 });
+        },
         () => {}
       );
     }
-  }, [userLocation]);
+  }, [userLocation, onCenterUser]);
 
   // Init map
   useEffect(() => {
@@ -174,15 +222,42 @@ export default function MapComponent({
     const key = `${flyToCoords[0]},${flyToCoords[1]}`;
     if (prevFlyTo.current === key) return;
     prevFlyTo.current = key;
-    mapRef.current.flyTo({ center: flyToCoords, zoom: 13, speed: 1.4 });
-  }, [flyToCoords]);
+    mapRef.current.flyTo({ center: flyToCoords, zoom: flyToZoom, speed: 1.4 });
+  }, [flyToCoords, flyToZoom]);
 
-  // Fly to user location when it becomes available
+  // Prefer a manually selected state center even if geolocation arrives afterwards.
   useEffect(() => {
-    const target = toLngLat(userLocation);
+    const target = toLngLat(searchCenter) || toLngLat(userLocation);
     if (!mapRef.current || !target || !mapReady) return;
-    mapRef.current.flyTo({ center: target, zoom: 11, speed: 1.2 });
-  }, [userLocation, mapReady]);
+    mapRef.current.flyTo({ center: target, zoom: searchCenter ? 6 : 11, speed: 1.2 });
+  }, [userLocation, searchCenter, mapReady]);
+
+  // Render the selected mileage radius as a geographic polygon.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
+    const center = toLngLat(searchCenter) || toLngLat(userLocation);
+    const data = createRadiusGeoJSON(center, distanceFilter);
+    const sourceId = "crew-search-radius";
+    const source = map.getSource(sourceId);
+    if (source) {
+      source.setData(data);
+      return;
+    }
+    map.addSource(sourceId, { type: "geojson", data });
+    map.addLayer({
+      id: "crew-search-radius-fill",
+      type: "fill",
+      source: sourceId,
+      paint: { "fill-color": "#0000FF", "fill-opacity": 0.10 }
+    });
+    map.addLayer({
+      id: "crew-search-radius-outline",
+      type: "line",
+      source: sourceId,
+      paint: { "line-color": "#0000FF", "line-width": 2, "line-dasharray": [2, 1] }
+    });
+  }, [mapReady, userLocation, searchCenter, distanceFilter]);
 
   // Render markers
   useEffect(() => {
@@ -202,16 +277,15 @@ export default function MapComponent({
           el("div", "font-family:Inter,sans-serif;font-size:12px;font-weight:bold;color:#047857;padding:2px 4px", "Your Location"))));
     }
 
+    const filterCenter = toLngLat(searchCenter) || userLngLat;
     jobs.forEach((job) => {
       const lngLat = toLngLat(job.location);
       if (!lngLat) return;
-      if (distanceFilter && userLngLat && haversine(userLngLat[1], userLngLat[0], lngLat[1], lngLat[0]) > distanceFilter) return;
+      if (distanceFilter && filterCenter && haversine(filterCenter[1], filterCenter[0], lngLat[1], lngLat[0]) > distanceFilter) return;
       const color = job.is_emergency ? "#EF4444" : job.is_featured ? "#F59E0B" : "#10B981";
       const size = job.is_emergency ? 36 : job.is_featured ? 32 : 28;
-      const pin = el("div", `width:${size}px;height:${size}px;background:${color};border-radius:50% 50% 50% 0;transform:rotate(-45deg);border:3px solid white;box-shadow:0 3px 10px rgba(0,0,0,0.35);cursor:pointer;transition:transform 0.15s`);
+      const pin = createStableJobMarker(size, color);
       pin.setAttribute("data-testid", `map-job-marker-${job.id}`);
-      pin.addEventListener("mouseenter", () => { pin.style.transform = "rotate(-45deg) scale(1.2)"; });
-      pin.addEventListener("mouseleave", () => { pin.style.transform = "rotate(-45deg) scale(1)"; });
       if (onJobClick) pin.addEventListener("click", () => onJobClick(job));
       add(new maplibregl.Marker({ element: pin }).setLngLat(lngLat)
         .setPopup(new maplibregl.Popup({ offset: 24, maxWidth: "240px" }).setDOMContent(jobPopupNode(job))));
@@ -237,7 +311,7 @@ export default function MapComponent({
         .setPopup(new maplibregl.Popup({ offset: 18, closeButton: true, maxWidth: "240px" }).setDOMContent(crewPopupNode(member, onCrewOffer))));
     });
     return () => { markersRef.current.forEach((m) => m.remove()); markersRef.current = []; };
-  }, [jobs, crew, userLocation, mapReady, distanceFilter, onJobClick, onCrewOffer]);
+  }, [jobs, crew, userLocation, searchCenter, mapReady, distanceFilter, onJobClick, onCrewOffer]);
 
   return (
     <div style={{ height, width: "100%", position: "relative" }}

@@ -11,7 +11,7 @@ axios.defaults.withCredentials = true;
 const readCookie = (name) =>
   document.cookie.split("; ").find(c => c.startsWith(`${name}=`))?.split("=")[1];
 const SAFE = ["GET", "HEAD", "OPTIONS"];
-const SESSION_CHANGING = /\/api\/auth\/(login|register|logout|logout-all|google\/callback|convert-to-contractor|reset-password)/;
+const SESSION_CHANGING = /\/api\/auth\/(login|register|logout|logout-all|google\/callback|convert-to-contractor|convert-to-crew|reset-password)/;
 let csrfCache = null;
 let csrfPromise = null;
 const fetchCsrf = () => {

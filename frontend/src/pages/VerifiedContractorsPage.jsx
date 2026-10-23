@@ -36,6 +36,7 @@ function ContractorCard({ c, onClick, selected }) {
             <span className="inline-flex items-center gap-1 bg-[#0000FF] text-white text-xs px-2 py-0.5 rounded-full font-semibold flex-shrink-0">
               <CheckCircle className="w-3 h-3" /> Verified
             </span>
+            {c.is_insured && <span className="inline-flex items-center gap-1 bg-emerald-100 text-emerald-800 text-xs px-2 py-0.5 rounded-full font-semibold" title="Self-reported insurance status"><Shield className="w-3 h-3" /> Insured</span>}
           </div>
           <p className="text-xs text-[#0000FF] font-semibold">{c.trade || "General Labor"}</p>
           <div className="flex items-center gap-3 mt-1">
@@ -87,6 +88,11 @@ function ContractorSidebar({ contractor, onClose }) {
         {contractor.bio && <p className="text-slate-600 dark:text-slate-300 text-sm mb-4 p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">{contractor.bio}</p>}
 
         <div className="space-y-2 mb-4">
+          {contractor.is_insured && (
+            <div className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-emerald-100 text-emerald-800 text-xs font-bold" title="Self-reported insurance status">
+              <Shield className="w-3 h-3" /> Insured
+            </div>
+          )}
           {contractor.rating > 0 && (
             <div className="flex items-center gap-2">
               <Star className="w-4 h-4 text-amber-500 fill-current" />
@@ -139,7 +145,7 @@ function ContractorSidebar({ contractor, onClose }) {
   );
 }
 
-function MapView({ contractors, onSelect, selected }) {
+function MapView({ contractors, onSelect, selected, userLocation }) {
   const mapRef = useRef(null);
   const mapInstance = useRef(null);
   const markersRef = useRef([]);
@@ -198,8 +204,15 @@ function MapView({ contractors, onSelect, selected }) {
       markersRef.current.push(new maplibregl.Marker({ element: label }).setLngLat(lngLat).addTo(map));
       bounds.extend(lngLat);
     });
-    if (!bounds.isEmpty()) map.fitBounds(bounds, { padding: 60, maxZoom: 11, duration: 600 });
-  }, [ready, contractors, selected, onSelect]);
+    if (selected) {
+      const selectedCoords = toLngLat(selected.location);
+      if (selectedCoords) map.flyTo({ center: selectedCoords, zoom: 10, duration: 600 });
+    } else if (userLocation) {
+      map.flyTo({ center: [userLocation.lng, userLocation.lat], zoom: 7, duration: 600 });
+    } else if (!bounds.isEmpty()) {
+      map.fitBounds(bounds, { padding: 60, maxZoom: 11, duration: 600 });
+    }
+  }, [ready, contractors, selected, onSelect, userLocation]);
 
   return (
     <div ref={mapRef} className="w-full h-full min-h-[400px] rounded-xl overflow-hidden" data-testid="verified-map-view" />
@@ -210,7 +223,8 @@ export default function VerifiedContractorsPage() {
   const [contractors, setContractors] = useState([]);
   const [pageSettings, setPageSettings] = useState({ verified_page_header: "FIND VERIFIED CONTRACTORS", verified_page_tagline: "For property owners, apartments and home owners." });
   const [loading, setLoading] = useState(true);
-  const [viewMode, setViewMode] = useState("list");
+  const [viewMode, setViewMode] = useState("map");
+  const [userLocation, setUserLocation] = useState(null);
   const [selectedState, setSelectedState] = useState("All States");
   const [selectedTrade, setSelectedTrade] = useState("All Trades");
   const [selected, setSelected] = useState(null);
@@ -218,6 +232,17 @@ export default function VerifiedContractorsPage() {
   const [debounced, setDebounced] = useState("");
 
   useEffect(() => { const t = setTimeout(() => setDebounced(query.trim()), 350); return () => clearTimeout(t); }, [query]);
+
+  useEffect(() => {
+    if (!navigator.geolocation) return;
+    let active = true;
+    navigator.geolocation.getCurrentPosition(
+      pos => { if (active) setUserLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude }); },
+      () => {},
+      { enableHighAccuracy: false, timeout: 8000, maximumAge: 300000 }
+    );
+    return () => { active = false; };
+  }, []);
 
   const onSelect = useCallback(c => setSelected(c), []);
 
@@ -316,7 +341,7 @@ export default function VerifiedContractorsPage() {
           </div>
         ) : (
           <div className="h-[500px] rounded-xl overflow-hidden">
-            <MapView contractors={contractors} onSelect={onSelect} selected={selected} />
+            <MapView contractors={contractors} onSelect={onSelect} selected={selected} userLocation={userLocation} />
           </div>
         )}
       </div>

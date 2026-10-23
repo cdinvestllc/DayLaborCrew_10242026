@@ -59,7 +59,7 @@ def client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-limiter = Limiter(key_func=client_ip)
+limiter = Limiter(key_func=client_ip, default_limits=["120/minute"])
 
 
 def log_security_event(event: str, request: Optional[Request] = None, **fields):

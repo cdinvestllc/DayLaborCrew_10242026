@@ -11,6 +11,7 @@ import AuthPage from "./pages/AuthPage";
 import AuthCallback from "./pages/AuthCallback";
 import CrewDashboard from "./pages/CrewDashboard";
 import ContractorDashboard from "./pages/ContractorDashboard";
+import ArchivedJobsPage from "./pages/ArchivedJobsPage";
 import AdminDashboard from "./pages/AdminDashboard";
 import ProfilePage from "./pages/ProfilePage";
 import SubscriptionPage from "./pages/SubscriptionPage";
@@ -80,6 +81,7 @@ function AppRoutes() {
           <WebSocketProvider><ContractorDashboard /></WebSocketProvider>
         </ProtectedRoute>
       } />
+      <Route path="/contractor/archives" element={<ProtectedRoute roles={["contractor"]}><ArchivedJobsPage /></ProtectedRoute>} />
       <Route path="/admin/dashboard" element={
         <ProtectedRoute roles={["admin", "super_admin"]}>
           <AdminDashboard />

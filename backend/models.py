@@ -63,6 +63,7 @@ class ProfileUpdate(BaseModel):
     state: Optional[str] = None
     portfolio: Optional[List[str]] = None
     certifications: Optional[List[Certification]] = Field(None, max_length=20)
+    is_insured: Optional[bool] = None
 
 
 class LocationUpdate(BaseModel):
@@ -102,13 +103,41 @@ class JobUpdate(BaseModel):
     status: Optional[str] = None
 
 
+class ClockInRequest(BaseModel):
+    lat: float
+    lng: float
+    accuracy_meters: Optional[float] = Field(None, ge=0, le=10000)
+
+
 # ─── Rating Models ───────────────────────────────────────────────────────────
 
 class RatingCreate(BaseModel):
     rated_id: str
     job_id: str
     stars: int = Field(..., ge=1, le=5)
-    review: Optional[str] = None
+    review: Optional[str] = Field(None, max_length=1000)
+
+
+class DisputeCreate(BaseModel):
+    dispute_type: str = "job"
+    category: str
+    reason: str = Field(..., min_length=10, max_length=2000)
+    evidence: Optional[str] = Field(None, max_length=3000)
+    rating_id: Optional[str] = None
+
+
+class DisputeResolution(BaseModel):
+    resolution: str
+    notes: str = Field("", max_length=2000)
+
+
+class DisputeMessageCreate(BaseModel):
+    body: str = Field(..., min_length=1, max_length=3000)
+
+
+class DisputeAppealCreate(BaseModel):
+    reason: str = Field(..., min_length=10, max_length=2000)
+    evidence: Optional[str] = Field(None, max_length=3000)
 
 
 # ─── Payment Models ──────────────────────────────────────────────────────────

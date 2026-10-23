@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import Navbar from "../components/Navbar";
 import AddressAutocomplete from "../components/AddressAutocomplete";
@@ -13,9 +14,6 @@ import { resolveImageUrl } from "../lib/media";
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
 const TRADES = ["Carpentry", "Electrical", "Plumbing", "Painting", "Landscaping", "Masonry", "HVAC", "Roofing", "Drywall", "General Labor", "Demolition", "Concrete"];
-
-const ALL_SKILLS = ["Framing", "Drywall", "Painting", "Flooring", "Roofing", "Electrical Work", "Plumbing", "Landscaping", "Concrete", "Welding", "HVAC", "Demolition", "Tile Setting", "Cabinetry", "Deck Building"];
-
 
 function MessagesPanel({ user }) {
   const [threads, setThreads] = useState([]);
@@ -103,7 +101,9 @@ function MessagesPanel({ user }) {
 
 export default function ProfilePage() {
   const { user, refreshUser, updateUser } = useAuth();
+  const navigate = useNavigate();
   const [editing, setEditing] = useState(false);
+  const [convertingToCrew, setConvertingToCrew] = useState(false);
   const [form, setForm] = useState({});
   const [ratings, setRatings] = useState([]);
   const [referralInfo, setReferralInfo] = useState(null);
@@ -112,9 +112,21 @@ export default function ProfilePage() {
   const [newSkill, setNewSkill] = useState("");
   const [portfolioUploading, setPortfolioUploading] = useState(false);
   const [portfolio, setPortfolio] = useState([]);
+  const [tradeOptions, setTradeOptions] = useState(TRADES);
   const [privacy, setPrivacy] = useState({});
   const fileRef = useRef(null);
   const portfolioRef = useRef(null);
+
+  useEffect(() => {
+    let active = true;
+    axios.get(`${API}/public/trades`)
+      .then(res => {
+        const names = (res.data || []).filter(t => t?.name && t.is_active !== false).map(t => t.name);
+        if (active && names.length) setTradeOptions(names);
+      })
+      .catch(() => {});
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     if (user) {
@@ -125,6 +137,7 @@ export default function ProfilePage() {
         trade: user.trade || "",
         skills: user.skills || [],
         company_name: user.company_name || "",
+        is_insured: user.is_insured === true,
         availability: user.availability !== false,
         address: user.address || "",
         lat: user.location?.lat ?? user.lat ?? null,
@@ -135,33 +148,41 @@ export default function ProfilePage() {
       });
       setPortfolio(user.portfolio || []);
       setPrivacy(user.privacy || {});
-      fetchReferralInfo();
-      fetchRatings();
     }
   }, [user]);
 
-  const fetchRatings = async () => {
+  const fetchRatings = useCallback(async () => {
     try {
       const myJobs = await axios.get(`${API}/jobs/my-jobs`);
       const completedJobs = (myJobs.data || []).filter(j => j.status === "completed");
       if (completedJobs.length > 0) {
         const ratingRes = await axios.get(`${API}/jobs/${completedJobs[0].id}/ratings`);
         setRatings(ratingRes.data.filter(r => r.rated_id === user?.id) || []);
+      } else {
+        setRatings([]);
       }
     } catch { }
-  };
+  }, [user?.id]);
 
-  const fetchReferralInfo = async () => {
+  const fetchReferralInfo = useCallback(async () => {
     try {
       const res = await axios.get(`${API}/users/referral/info`);
       setReferralInfo(res.data);
     } catch { }
-  };
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    fetchReferralInfo();
+    fetchRatings();
+  }, [user, fetchReferralInfo, fetchRatings]);
 
   const saveProfile = async () => {
     setLoading(true);
     try {
-      const res = await axios.put(`${API}/users/profile`, form);
+      const payload = { ...form };
+      if (user?.role !== "contractor") delete payload.is_insured;
+      const res = await axios.put(`${API}/users/profile`, payload);
       updateUser(res.data);
       setEditing(false);
       toast.success("Profile updated!");
@@ -259,6 +280,21 @@ export default function ProfilePage() {
     });
   };
 
+  const convertToCrew = async () => {
+    if (!window.confirm("Convert this account to a Crew Member account? Active contractor jobs must be closed first.")) return;
+    setConvertingToCrew(true);
+    try {
+      const res = await axios.post(`${API}/auth/convert-to-crew`);
+      updateUser(res.data.user);
+      toast.success("Account converted to Crew Member");
+      navigate("/crew/dashboard", { replace: true });
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Could not convert account");
+    } finally {
+      setConvertingToCrew(false);
+    }
+  };
+
   const addSkill = (skill) => {
     if (!form.skills.includes(skill)) {
       setForm(f => ({ ...f, skills: [...f.skills, skill] }));
@@ -302,6 +338,11 @@ export default function ProfilePage() {
               <h2 className="font-extrabold text-[#050A30] dark:text-white text-xl" style={{ fontFamily: "Manrope, sans-serif" }}>{user?.name}</h2>
               <p className="text-slate-500 text-sm capitalize">{user?.trade || user?.company_name || user?.role}</p>
               <span className="inline-block mt-1 px-2 py-0.5 bg-[#050A30] text-white text-xs rounded-full font-bold capitalize">{user?.role}</span>
+              {user?.role === "contractor" && user?.is_insured && (
+                <span className="inline-flex items-center gap-1 mt-2 ml-1 px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-xs font-bold" title="Self-reported insurance status" data-testid="profile-insured-badge">
+                  <Shield className="w-3 h-3" /> Insured
+                </span>
+              )}
 
               <div className="flex items-center justify-center gap-1 mt-2">
                 {[1,2,3,4,5].map(s => (
@@ -318,6 +359,14 @@ export default function ProfilePage() {
               </button>
 
               <ProfileChecklist user={user} onEdit={() => setEditing(true)} />
+
+              {user?.role === "contractor" && (
+                <button type="button" onClick={convertToCrew} disabled={convertingToCrew}
+                  className="w-full mt-3 inline-flex items-center justify-center px-4 py-2.5 rounded-lg border border-[#0000FF] text-[#0000FF] font-semibold text-sm hover:bg-blue-50 disabled:opacity-60"
+                  data-testid="convert-to-crew-btn">
+                  {convertingToCrew ? "Converting..." : "Convert to Crew Member"}
+                </button>
+              )}
 
               <div className="grid grid-cols-2 gap-3 mt-4">
                 <div className="bg-blue-50 dark:bg-blue-950 rounded-lg p-2">
@@ -409,7 +458,7 @@ export default function ProfilePage() {
                         className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-[#0000FF] dark:bg-slate-800 dark:text-white"
                         data-testid="profile-trade-select">
                         <option value="">Select trade</option>
-                        {TRADES.map(t => <option key={t} value={t.toLowerCase()}>{t}</option>)}
+                        {tradeOptions.map(t => <option key={t} value={t.toLowerCase()}>{t}</option>)}
                       </select>
                     </div>
                   )}
@@ -419,6 +468,12 @@ export default function ProfilePage() {
                       <label className="block text-sm font-semibold text-[#050A30] dark:text-white mb-1">Company Name</label>
                       <input value={form.company_name} onChange={e => setForm(f => ({ ...f, company_name: e.target.value }))}
                         className="w-full border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-[#0000FF] dark:bg-slate-800 dark:text-white" />
+                      <label className="mt-3 flex items-start gap-2 text-sm text-slate-700 dark:text-slate-300">
+                        <input type="checkbox" checked={!!form.is_insured}
+                          onChange={e => setForm(f => ({ ...f, is_insured: e.target.checked }))}
+                          className="mt-0.5 h-4 w-4 accent-[#0000FF]" data-testid="profile-insured-checkbox" />
+                        <span><strong>We are insured</strong><span className="block text-xs text-slate-500">Self-reported; this setting does not verify an insurance policy.</span></span>
+                      </label>
                     </div>
                   )}
 
@@ -452,7 +507,7 @@ export default function ProfilePage() {
                         ))}
                       </div>
                       <div className="flex flex-wrap gap-1">
-                        {ALL_SKILLS.filter(s => !form.skills.includes(s)).map(skill => (
+                        {tradeOptions.filter(s => !form.skills.some(existing => String(existing).toLowerCase() === s.toLowerCase())).map(skill => (
                           <button key={skill} onClick={() => addSkill(skill)}
                             className="text-xs px-2 py-1 rounded-full border border-slate-200 dark:border-slate-600 text-slate-500 hover:border-[#0000FF] hover:text-[#0000FF]">
                             + {skill}
@@ -522,13 +577,13 @@ export default function ProfilePage() {
                   <p className="text-slate-300 text-xs mt-1">Upload up to 8 images to showcase your work</p>
                 </div>
               ) : (
-                <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                <div className="flex gap-3 overflow-x-auto snap-x snap-mandatory pb-3" role="region" aria-label="Portfolio images" data-testid="portfolio-carousel">
                   {portfolio.map((url, i) => (
-                    <div key={i} className="relative group aspect-square rounded-lg overflow-hidden bg-slate-100 dark:bg-slate-800">
-                      <SafeImage src={resolveImageUrl(url)} alt={`Portfolio ${i+1}`} className="w-full h-full object-cover" />
+                    <div key={i} className="relative group flex-none w-56 sm:w-64 snap-start aspect-square rounded-lg overflow-hidden bg-slate-100 dark:bg-slate-800">
+                      <SafeImage src={resolveImageUrl(url)} alt={`Portfolio image ${i + 1}`} className="w-full h-full object-cover" />
                       <button onClick={() => removePortfolioImage(url)}
-                        className="absolute top-1 right-1 w-6 h-6 bg-red-500 text-white rounded-full items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hidden group-hover:flex"
-                        data-testid={`remove-portfolio-${i}`}>
+                        className="absolute top-1 right-1 w-8 h-8 bg-red-500 text-white rounded-full flex items-center justify-center sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
+                        aria-label={`Remove portfolio image ${i + 1}`} data-testid={`remove-portfolio-${i}`}>
                         <X className="w-3.5 h-3.5" />
                       </button>
                     </div>
