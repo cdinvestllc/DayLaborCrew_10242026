@@ -193,7 +193,7 @@ function JobsTab() {
     setLoading(false);
   }, []);
 
-  useEffect(() => { fetchJobs(1, search, statusFilter, tradeFilter); }, []);
+  useEffect(() => { fetchJobs(1, search, statusFilter, tradeFilter); }, [fetchJobs, search, statusFilter, tradeFilter]);
 
   const deleteJob = async (jobId, title) => {
     if (!window.confirm(`Delete job "${title}"?`)) return;

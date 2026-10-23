@@ -39,9 +39,9 @@ export default function DisputeCenter({ jobs = [] }) {
       setCases(flattened);
       setActiveId(currentId => currentId && !flattened.some(item => item.id === currentId) ? "" : currentId);
     } finally { setLoadingCases(false); }
-  }, [jobsKey, jobsById, refreshKey]);
+  }, [jobsKey, jobsById]);
 
-  useEffect(() => { loadCases(); }, [loadCases]);
+  useEffect(() => { loadCases(); }, [loadCases, refreshKey]);
 
   const loadThread = useCallback(async () => {
     const item = cases.find(entry => entry.id === activeId);
