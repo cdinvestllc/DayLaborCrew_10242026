@@ -715,6 +715,10 @@ async def appeal_dispute(job_id: str, dispute_id: str, data: DisputeAppealCreate
          "$push": {"messages": {"$each": [message], "$slice": -500}}})
     if changed.modified_count != 1:
         raise HTTPException(status_code=409, detail="This dispute has already been appealed or its status changed")
+    if dispute.get("dispute_type") == "job":
+        await db.jobs.update_one(
+            {"id": job_id},
+            {"$set": {"dispute_status": "open", "last_dispute_id": dispute_id}})
     return {"message": "Appeal submitted for administrator review", "appeal": appeal}
 
 
