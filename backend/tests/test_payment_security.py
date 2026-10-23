@@ -482,3 +482,43 @@ def test_subscription_transaction_remains_retryable_if_entitlement_write_fails(m
 )
 def test_payment_capture_requires_matching_provider_amount_and_currency(tx, provider, amount, currency, expected):
     assert payments._payment_matches_transaction(tx, provider, amount, currency) is expected
+
+
+
+@pytest.mark.parametrize(
+    "tx,status,provider,expected",
+    [
+        (
+            {"payment_method": "stripe", "amount": 19.99, "currency": "usd"},
+            type("Status", (), {"payment_status": "paid", "amount_total": 1999, "currency": "USD"})(),
+            "stripe",
+            True,
+        ),
+        (
+            {"payment_method": "stripe", "amount": 19.99, "currency": "usd"},
+            type("Status", (), {"payment_status": "paid", "amount_total": 1998, "currency": "USD"})(),
+            "stripe",
+            False,
+        ),
+        (
+            {"payment_method": "stripe", "amount": 19.99, "currency": "usd"},
+            type("Status", (), {"payment_status": "paid", "amount_total": 1999, "currency": "EUR"})(),
+            "stripe",
+            False,
+        ),
+        (
+            {"payment_method": "paypal", "amount": 19.99, "currency": "usd"},
+            type("Status", (), {"payment_status": "paid", "amount_total": 1999, "currency": "USD"})(),
+            "stripe",
+            False,
+        ),
+        (
+            {"payment_method": "stripe", "amount": 19.99, "currency": "usd"},
+            type("Status", (), {"payment_status": "unpaid", "amount_total": 1999, "currency": "USD"})(),
+            "stripe",
+            False,
+        ),
+    ],
+)
+def test_checkout_status_must_match_paid_provider_amount_and_currency(tx, status, provider, expected):
+    assert payments._checkout_status_matches_transaction(tx, status, provider) is expected

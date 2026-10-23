@@ -93,6 +93,20 @@ def _payment_matches_transaction(
     )
 
 
+def _checkout_status_matches_transaction(tx: dict | None, status, provider: str) -> bool:
+    """Validate a provider's checkout-status response against our local transaction."""
+    if not tx or tx.get("payment_method") != provider:
+        return False
+    if getattr(status, "payment_status", None) != "paid":
+        return False
+    return _transaction_amount_matches(
+        tx,
+        getattr(status, "amount_total", None),
+        getattr(status, "currency", None),
+        minor_units=True,
+    )
+
+
 def _verify_stripe_event(payload: bytes, signature: str, secret: str):
     if not secret:
         raise HTTPException(status_code=503, detail="Stripe webhook is not configured")
@@ -478,9 +492,7 @@ async def stripe_payment_status(session_id: str, request: Request, current_user:
     if status.payment_status == "paid":
         if tx.get("plan") not in PLANS:
             raise HTTPException(status_code=409, detail="This payment does not match a subscription transaction")
-        if not _transaction_amount_matches(
-            tx, getattr(status, "amount_total", None), getattr(status, "currency", None), minor_units=True
-        ):
+        if not _checkout_status_matches_transaction(tx, status, "stripe"):
             logger.error("Stripe status amount/currency did not match its local transaction")
             raise HTTPException(status_code=409, detail="Payment does not match the recorded transaction")
 
@@ -913,14 +925,28 @@ async def boost_job_stripe(job_id: str, request: Request, current_user: dict = D
 async def boost_stripe_status(session_id: str, request: Request, current_user: dict = Depends(get_current_user)):
     stripe = StripeCheckout(api_key=_stripe_api_key(), webhook_url=f"{str(request.base_url)}api/payments/stripe/webhook")
     tx = await get_owned_tx(session_id, current_user)
-    if tx and tx.get("payment_status") == "paid":
-        return {"status": "complete", "already_processed": True}
+    if not tx or tx.get("plan") != "boost" or tx.get("payment_method") != "stripe":
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if tx.get("payment_status") == "paid":
+        return {"status": "complete", "payment_status": "paid", "already_processed": True}
+    if tx.get("payment_status") in {"cancelled", "canceled", "refunded"}:
+        raise HTTPException(status_code=409, detail="This payment can no longer be fulfilled")
 
     status = await stripe.get_checkout_status(session_id)
-    if status.metadata.get("user_id") not in (None, current_user["id"]) and current_user.get("role") not in ("admin", "super_admin"):
+    metadata = getattr(status, "metadata", {}) or {}
+    if metadata.get("user_id") != tx.get("user_id") or metadata.get("type") != "boost":
         raise HTTPException(status_code=404, detail="Payment not found")
+    if metadata.get("job_id") != tx.get("job_id"):
+        raise HTTPException(status_code=409, detail="Payment does not match the recorded transaction")
     if status.payment_status == "paid":
+        if not _checkout_status_matches_transaction(tx, status, "stripe"):
+            logger.error("Stripe boost status did not match its recorded provider, amount, or currency")
+            raise HTTPException(status_code=409, detail="Payment does not match the recorded transaction")
         await _fulfill_boost_tx(session_id)
+        updated_tx = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
+        if not updated_tx or updated_tx.get("payment_status") != "paid":
+            raise HTTPException(status_code=409, detail="Payment is confirmed but fulfillment is not complete; retry status shortly")
+        return {"status": "complete", "payment_status": "paid"}
     return {"status": status.status, "payment_status": status.payment_status}
 
 
