@@ -48,7 +48,7 @@ export default function AuthCallback() {
     };
 
     exchange();
-  }, []);
+  }, [location.hash, navigate, updateUser]);
 
   return (
     <div className="min-h-screen bg-[#050A30] flex items-center justify-center">
