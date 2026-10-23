@@ -21,7 +21,7 @@ from auth import limiter  # noqa: E402
 from routes import auth_routes as auth_routes  # noqa: E402
 from routes import payment_routes as payments  # noqa: E402
 from routes import job_routes as job_routes  # noqa: E402
-from models import ProfileUpdate, ClockInRequest  # noqa: E402
+from models import ProfileUpdate, ClockInRequest, DisputeCreate, DisputeResolution  # noqa: E402
 from routes.user_routes import _build_crew_search_query  # noqa: E402
 
 
@@ -193,3 +193,48 @@ def test_clock_in_rejects_inaccurate_gps_readings():
 def test_clock_in_accepts_missing_accuracy_from_older_clients():
     assert job_routes.validate_clock_in_accuracy(None) is None
     assert job_routes.validate_clock_in_accuracy(10) is None
+
+
+def test_job_dispute_requires_participant_and_reviewable_state():
+    job = {"id": "job-1", "contractor_id": "contractor-1", "crew_accepted": ["crew-1"],
+           "status": "completed_pending_review"}
+    assert job_routes.validate_dispute_submission(
+        job, {"id": "crew-1", "role": "crew"}, "job", "completion") == "contractor-1"
+    with pytest.raises(HTTPException) as unrelated:
+        job_routes.validate_dispute_submission(job, {"id": "stranger", "role": "crew"}, "job", "completion")
+    assert unrelated.value.status_code == 403
+    with pytest.raises(HTTPException) as completed:
+        job_routes.validate_dispute_submission(
+            {**job, "status": "completed"}, {"id": "crew-1", "role": "crew"}, "job", "completion")
+    assert completed.value.status_code == 409
+
+
+def test_rating_dispute_requires_matching_job_and_author_or_recipient():
+    job = {"id": "job-1", "contractor_id": "contractor-1", "crew_accepted": ["crew-1"], "status": "completed"}
+    rating = {"id": "rating-1", "job_id": "job-1", "rater_id": "contractor-1", "rated_id": "crew-1"}
+    assert job_routes.validate_dispute_submission(
+        job, {"id": "crew-1", "role": "crew"}, "rating", "abusive", rating) == "contractor-1"
+    with pytest.raises(HTTPException) as unrelated:
+        job_routes.validate_dispute_submission(job, {"id": "stranger", "role": "crew"}, "rating", "abusive", rating)
+    assert unrelated.value.status_code == 403
+
+
+def test_dispute_resolution_actions_are_restricted_by_type():
+    job_routes.validate_dispute_resolution({"dispute_type": "job"}, "uphold")
+    job_routes.validate_dispute_resolution({"dispute_type": "rating", "rating_id": "rating-1"}, "hide_rating")
+    with pytest.raises(HTTPException):
+        job_routes.validate_dispute_resolution({"dispute_type": "job"}, "hide_rating")
+    with pytest.raises(HTTPException):
+        job_routes.validate_dispute_resolution({"dispute_type": "rating"}, "restore_rating")
+
+
+def test_rating_summary_recalculates_only_valid_visible_stars():
+    assert job_routes.rating_summary([5, 4, 0, 7, "5"]) == {"rating": 4.5, "rating_count": 2}
+    assert job_routes.rating_summary([]) == {"rating": 0, "rating_count": 0}
+
+
+def test_dispute_models_enforce_reason_and_resolution_note_limits():
+    with pytest.raises(Exception):
+        DisputeCreate(dispute_type="job", category="completion", reason="short")
+    with pytest.raises(Exception):
+        DisputeResolution(resolution="dismiss", notes="x" * 2001)

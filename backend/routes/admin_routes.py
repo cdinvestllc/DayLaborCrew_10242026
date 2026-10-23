@@ -5,7 +5,7 @@ from utils.storage import save_image
 from models import (
     AdminUserUpdate, TermsUpdate, SettingsUpdate, CMSUpdate,
     TradeCreate, TradeUpdate, BulkEmailRequest, ActivityLogEntry,
-    MessageCreate, MessageReply, CouponCreate
+    MessageCreate, MessageReply, CouponCreate, DisputeResolution
 )
 from typing import Optional
 import uuid
@@ -1158,8 +1158,73 @@ async def save_push_subscription(request: Request, current_user: dict = Depends(
 
 
 
+@router.get("/disputes")
+async def list_disputes(
+    status: str = Query("open", regex="^(open|resolved|all)$"),
+    limit: int = Query(100, ge=1, le=200),
+    admin: dict = Depends(require_admin),
+):
+    query = {} if status == "all" else {"status": status}
+    items = await db.disputes.find(query, {"_id": 0}).sort("created_at", -1).to_list(limit)
+    results = []
+    for item in items:
+        reporter = await db.users.find_one({"id": item.get("reporter_id")}, {"_id": 0, "name": 1, "email": 1})
+        respondent = await db.users.find_one({"id": item.get("respondent_id")}, {"_id": 0, "name": 1, "email": 1}) if item.get("respondent_id") else None
+        item["reporter_name"] = reporter.get("name", "Unknown") if reporter else "Unknown"
+        item["respondent_name"] = respondent.get("name", "Multiple participants") if respondent else "Multiple participants"
+        if item.get("rating_id"):
+            item["rating"] = await db.ratings.find_one(
+                {"id": item["rating_id"]}, {"_id": 0, "stars": 1, "review": 1, "hidden": 1})
+        results.append(item)
+    return results
+
+
+@router.post("/disputes/{dispute_id}/resolve")
+async def resolve_dispute(dispute_id: str, data: DisputeResolution, request: Request, admin: dict = Depends(require_admin)):
+    dispute = await db.disputes.find_one({"id": dispute_id}, {"_id": 0})
+    if not dispute:
+        raise HTTPException(status_code=404, detail="Dispute not found")
+    if dispute.get("status") != "open":
+        raise HTTPException(status_code=409, detail="Dispute has already been resolved")
+
+    from routes.job_routes import validate_dispute_resolution, rating_summary
+    validate_dispute_resolution(dispute, data.resolution)
+    now = datetime.now(timezone.utc).isoformat()
+    notes = data.notes.strip()
+
+    if dispute.get("dispute_type") == "rating" and data.resolution in {"hide_rating", "restore_rating"}:
+        hidden = data.resolution == "hide_rating"
+        rating = await db.ratings.find_one({"id": dispute.get("rating_id")}, {"_id": 0})
+        if not rating:
+            raise HTTPException(status_code=409, detail="The disputed rating no longer exists")
+        await db.ratings.update_one(
+            {"id": rating["id"]},
+            {"$set": {"hidden": hidden, "moderation_reason": notes or f"Dispute resolution: {data.resolution}",
+                      "moderated_by": admin["id"], "moderated_at": now}})
+        visible = await db.ratings.find(
+            {"rated_id": rating["rated_id"], "hidden": {"$ne": True}},
+            {"_id": 0, "stars": 1}).to_list(5000)
+        await db.users.update_one(
+            {"id": rating["rated_id"]},
+            {"$set": rating_summary([entry.get("stars") for entry in visible])})
+
+    await db.disputes.update_one(
+        {"id": dispute_id, "status": "open"},
+        {"$set": {"status": "resolved", "resolution": data.resolution, "resolution_notes": notes,
+                  "resolved_by": admin["id"], "resolved_at": now}})
+    if dispute.get("dispute_type") == "job":
+        remaining = await db.disputes.count_documents(
+            {"job_id": dispute["job_id"], "dispute_type": "job", "status": "open"})
+        if remaining == 0:
+            await db.jobs.update_one(
+                {"id": dispute["job_id"], "dispute_status": "open"},
+                {"$set": {"dispute_status": f"resolved_{data.resolution}", "dispute_resolved_at": now}})
+    await log_activity(request, admin, "resolve_dispute", "dispute", dispute_id,
+                       f"resolution={data.resolution}; notes={notes[:300]}")
+    return {"message": "Dispute resolved", "dispute_id": dispute_id, "resolution": data.resolution}
+
+
 @router.put("/ratings/{rating_id}/moderate")
-async def moderate_rating(rating_id: str, request: Request, admin: dict = Depends(require_admin)):
     """Hide or restore a review; the rated user's average is recalculated and the action logged."""
     body = await request.json()
     hidden = bool(body.get("hidden", True))
