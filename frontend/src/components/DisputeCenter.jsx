@@ -37,9 +37,9 @@ export default function DisputeCenter({ jobs = [] }) {
       }));
       const flattened = responses.flat().sort((a, b) => String(b.updated_at || b.created_at || "").localeCompare(String(a.updated_at || a.created_at || "")));
       setCases(flattened);
-      if (activeId && !flattened.some(item => item.id === activeId)) { setActiveId(""); setThread(null); }
+      setActiveId(currentId => currentId && !flattened.some(item => item.id === currentId) ? "" : currentId);
     } finally { setLoadingCases(false); }
-  }, [jobsKey, jobsById, activeId, refreshKey]);
+  }, [jobsKey, jobsById, refreshKey]);
 
   useEffect(() => { loadCases(); }, [loadCases]);
 
