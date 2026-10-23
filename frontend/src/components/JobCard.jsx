@@ -96,6 +96,13 @@ export default function JobCard({ job, onAccept, onStart, onComplete, onClockIn,
         />
       </div>
 
+      {job.dispute_status === "open" && (
+        <div className="mb-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 dark:bg-amber-950/30 p-3 text-xs text-amber-800 dark:text-amber-200" role="status" data-testid={`job-dispute-open-${job.id}`}>
+          <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+          <span>This job has an open dispute. Completion verification is paused until an administrator records a resolution.</span>
+        </div>
+      )}
+
       {/* Description */}
       {job.description && (
         <p className="text-xs text-slate-500 dark:text-slate-400 mb-3 line-clamp-2">{job.description}</p>
@@ -153,10 +160,11 @@ export default function JobCard({ job, onAccept, onStart, onComplete, onClockIn,
         {isContractor && job.status === "completed_pending_review" && (
           <button
             onClick={() => onVerify?.(job.id)}
-            className="flex-1 bg-emerald-600 text-white font-bold py-2 px-4 rounded-lg text-sm hover:bg-emerald-700 transition-colors"
+            disabled={job.dispute_status === "open"}
+            className="flex-1 bg-emerald-600 text-white font-bold py-2 px-4 rounded-lg text-sm hover:bg-emerald-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             data-testid={`verify-job-${job.id}`}
           >
-            Verify Complete
+            {job.dispute_status === "open" ? "Dispute Under Review" : "Verify Complete"}
           </button>
         )}
         {isContractor && job.status === "completed" &&
