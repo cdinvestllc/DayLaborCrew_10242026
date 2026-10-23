@@ -449,6 +449,98 @@ async def complete_job(job_id: str, current_user: dict = Depends(get_current_use
     return {"message": "Job marked complete, awaiting contractor review"}
 
 
+JOB_DISPUTE_CATEGORIES = {"completion", "conduct", "safety", "scope", "other"}
+RATING_DISPUTE_CATEGORIES = {"inaccurate", "abusive", "retaliatory", "other"}
+
+
+def validate_dispute_submission(job: dict, reporter: dict, dispute_type: str, category: str,
+                                rating: dict | None = None) -> str | None:
+    """Validate participant permissions and category before accepting dispute writes."""
+    reporter_id = reporter.get("id")
+    is_contractor = reporter_id == job.get("contractor_id") and reporter.get("role") == "contractor"
+    is_crew = reporter.get("role") == "crew" and reporter_id in job.get("crew_accepted", [])
+    if not (is_contractor or is_crew):
+        raise HTTPException(status_code=403, detail="Only participants in this job can open a dispute")
+    if dispute_type == "job":
+        if category not in JOB_DISPUTE_CATEGORIES:
+            raise HTTPException(status_code=400, detail="Invalid job dispute category")
+        if job.get("status") not in {"in_progress", "completed_pending_review"}:
+            raise HTTPException(status_code=409, detail="Job disputes must be opened while work is in progress or awaiting completion review")
+        return None if is_contractor else job.get("contractor_id")
+    if dispute_type == "rating":
+        if category not in RATING_DISPUTE_CATEGORIES:
+            raise HTTPException(status_code=400, detail="Invalid rating dispute category")
+        if not rating or rating.get("job_id") != job.get("id"):
+            raise HTTPException(status_code=404, detail="Rating not found for this job")
+        if reporter_id not in {rating.get("rater_id"), rating.get("rated_id")}:
+            raise HTTPException(status_code=403, detail="Only the author or recipient of this rating can dispute it")
+        return rating.get("rater_id") if reporter_id == rating.get("rated_id") else rating.get("rated_id")
+    raise HTTPException(status_code=400, detail="Dispute type must be job or rating")
+
+
+def validate_dispute_resolution(dispute: dict, resolution: str) -> None:
+    allowed = {"uphold", "dismiss"} if dispute.get("dispute_type") == "job" else {"hide_rating", "restore_rating", "dismiss"}
+    if resolution not in allowed:
+        raise HTTPException(status_code=400, detail="Resolution is not valid for this dispute type")
+    if dispute.get("dispute_type") == "rating" and resolution != "dismiss" and not dispute.get("rating_id"):
+        raise HTTPException(status_code=409, detail="This rating dispute has no linked rating")
+
+
+def rating_summary(stars: list[int | float]) -> dict:
+    clean = [value for value in stars if isinstance(value, (int, float)) and 1 <= value <= 5]
+    return {"rating": round(sum(clean) / len(clean), 1) if clean else 0, "rating_count": len(clean)}
+
+
+@router.post("/{job_id}/disputes")
+async def create_job_dispute(job_id: str, data: DisputeCreate, current_user: dict = Depends(get_current_user)):
+    job = await db.jobs.find_one({"id": job_id}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    rating = None
+    if data.dispute_type == "rating":
+        if not data.rating_id:
+            raise HTTPException(status_code=400, detail="rating_id is required for rating disputes")
+        rating = await db.ratings.find_one({"id": data.rating_id}, {"_id": 0})
+    validate_dispute_submission(job, current_user, data.dispute_type, data.category, rating)
+    duplicate_query = {"job_id": job_id, "reporter_id": current_user["id"],
+                       "dispute_type": data.dispute_type, "status": "open"}
+    if data.dispute_type == "rating":
+        duplicate_query["rating_id"] = data.rating_id
+    if await db.disputes.find_one(duplicate_query, {"_id": 0, "id": 1}):
+        raise HTTPException(status_code=409, detail="You already have an open dispute for this item")
+    dispute = {
+        "id": str(uuid.uuid4()), "job_id": job_id, "job_title": job.get("title", ""),
+        "dispute_type": data.dispute_type, "category": data.category,
+        "reason": data.reason.strip(), "evidence": data.evidence.strip() if data.evidence else "",
+        "rating_id": data.rating_id if data.dispute_type == "rating" else None,
+        "reporter_id": current_user["id"], "reporter_role": current_user["role"],
+        "respondent_id": None,
+        "respondent_ids": job.get("crew_accepted", []) if current_user["id"] == job.get("contractor_id") else [job.get("contractor_id")],
+        "status": "open", "created_at": now_str(),
+    }
+    if data.dispute_type == "rating":
+        dispute["respondent_id"] = rating.get("rated_id") if current_user["id"] == rating.get("rater_id") else rating.get("rater_id")
+        dispute["respondent_ids"] = [dispute["respondent_id"]]
+    elif current_user["id"] != job.get("contractor_id"):
+        dispute["respondent_id"] = job.get("contractor_id")
+    await db.disputes.insert_one(dispute)
+    if data.dispute_type == "job":
+        await db.jobs.update_one({"id": job_id}, {"$set": {"dispute_status": "open", "last_dispute_id": dispute["id"]}})
+    return {"message": "Dispute submitted for administrator review", "dispute": {k: v for k, v in dispute.items() if k != "_id"}}
+
+
+@router.get("/{job_id}/disputes")
+async def get_my_job_disputes(job_id: str, current_user: dict = Depends(get_current_user)):
+    job = await db.jobs.find_one({"id": job_id}, {"_id": 0, "contractor_id": 1, "crew_accepted": 1})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if current_user["id"] != job["contractor_id"] and current_user["id"] not in job.get("crew_accepted", []):
+        raise HTTPException(status_code=403, detail="Not part of this job")
+    return await db.disputes.find(
+        {"job_id": job_id, "reporter_id": current_user["id"]}, {"_id": 0}
+    ).sort("created_at", -1).to_list(50)
+
+
 @router.post("/{job_id}/verify")
 async def verify_job(job_id: str, current_user: dict = Depends(get_current_user)):
     job = await db.jobs.find_one({"id": job_id}, {"_id": 0})
@@ -456,6 +548,10 @@ async def verify_job(job_id: str, current_user: dict = Depends(get_current_user)
         raise HTTPException(status_code=404, detail="Job not found")
     if job["contractor_id"] != current_user["id"]:
         raise HTTPException(status_code=403, detail="Only the contractor can verify")
+    open_dispute = await db.disputes.find_one(
+        {"job_id": job_id, "dispute_type": "job", "status": "open"}, {"_id": 0, "id": 1})
+    if open_dispute:
+        raise HTTPException(status_code=409, detail="This job has an open dispute. An administrator must resolve it before completion can be verified.")
     now = now_str()
     result = await db.jobs.update_one({"id": job_id, "status": "completed_pending_review"},
                                       {"$set": {"status": "completed", "completed_at": now}})
