@@ -1,0 +1,78 @@
+name: Legacy Backend Integration Tests (Staging)
+
+on:
+  push:
+    branches: [fix/payment-webhook-security-2026-10]
+  workflow_dispatch:
+    inputs:
+      confirm_staging:
+        description: "Run write-capable legacy integration tests against the isolated staging environment"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  legacy-backend-staging:
+    name: Legacy backend integration tests (isolated staging)
+    if: ${{ github.event_name == 'push' || inputs.confirm_staging }}
+    runs-on: ubuntu-latest
+    environment: staging
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      PYTHONPATH: tests
+      STAGING_API_URL: ${{ vars.STAGING_API_URL }}
+      STAGING_WEB_ORIGIN: ${{ vars.STAGING_WEB_ORIGIN }}
+      STAGING_MONGO_URL: ${{ secrets.STAGING_MONGO_URL }}
+      STAGING_MONGO_HOST: ${{ vars.STAGING_MONGO_HOST }}
+      STAGING_DB_NAME: ${{ vars.STAGING_DB_NAME }}
+      STAGING_STRIPE_MODE: ${{ vars.STAGING_STRIPE_MODE }}
+      STAGING_SUPERADMIN_EMAIL: ${{ vars.STAGING_SUPERADMIN_EMAIL }}
+      STAGING_SUPERADMIN_PASSWORD: ${{ secrets.STAGING_SUPERADMIN_PASSWORD }}
+      STAGING_ADMIN_EMAIL: ${{ vars.STAGING_ADMIN_EMAIL }}
+      STAGING_ADMIN_PASSWORD: ${{ secrets.STAGING_ADMIN_PASSWORD }}
+      STAGING_CONTRACTOR1_EMAIL: ${{ vars.STAGING_CONTRACTOR1_EMAIL }}
+      STAGING_CONTRACTOR1_PASSWORD: ${{ secrets.STAGING_CONTRACTOR1_PASSWORD }}
+      STAGING_CONTRACTOR2_EMAIL: ${{ vars.STAGING_CONTRACTOR2_EMAIL }}
+      STAGING_CONTRACTOR2_PASSWORD: ${{ secrets.STAGING_CONTRACTOR2_PASSWORD }}
+      STAGING_CONTRACTOR3_EMAIL: ${{ vars.STAGING_CONTRACTOR3_EMAIL }}
+      STAGING_CONTRACTOR3_PASSWORD: ${{ secrets.STAGING_CONTRACTOR3_PASSWORD }}
+      STAGING_CREW_EMAIL: ${{ vars.STAGING_CREW_EMAIL }}
+      STAGING_CREW_PASSWORD: ${{ secrets.STAGING_CREW_PASSWORD }}
+      STAGING_CREW2_EMAIL: ${{ vars.STAGING_CREW2_EMAIL }}
+      STAGING_CREW2_PASSWORD: ${{ secrets.STAGING_CREW2_PASSWORD }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate dedicated staging target and seed configuration
+        run: |
+          python - <<'PY'
+          from staging_config import validate_staging_configuration
+          api_host, web_host, db_name = validate_staging_configuration()
+          print(f"Validated isolated staging API host: {api_host}")
+          print(f"Validated staging web origin host: {web_host}")
+          print(f"Validated isolated staging database name: {db_name}")
+          print("Seeded test-account configuration is present; credential values were not printed.")
+          PY
+      - name: Install backend test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          grep -v '^emergentintegrations==' requirements.txt > "$RUNNER_TEMP/requirements-ci.txt"
+          pip install -r "$RUNNER_TEMP/requirements-ci.txt"
+      - name: Run legacy integration suite against staging
+        run: |
+          pytest -q \
+            tests/test_demo_login_cors.py \
+            tests/test_iteration2.py \
+            tests/test_iteration6_csrf_emergency.py \
+            tests/test_iteration7_crew_status_refund.py \
+            tests/test_new_features.py \
+            tests/test_security.py
