@@ -1317,10 +1317,13 @@ async def resolve_dispute_appeal(dispute_id: str, data: DisputeResolution, reque
          "$push": {"messages": {"$each": [appeal_message], "$slice": -500}}})
     if changed.modified_count != 1:
         raise HTTPException(status_code=409, detail="Dispute changed while resolving appeal. Refresh and try again.")
-    if dispute.get("dispute_type") == "job" and data.resolution != "uphold_original":
-        await db.jobs.update_one(
-            {"id": dispute["job_id"]},
-            {"$set": {"dispute_status": f"resolved_{data.resolution}", "dispute_resolved_at": now}})
+    if dispute.get("dispute_type") == "job":
+        remaining = await db.disputes.count_documents(
+            {"job_id": dispute["job_id"], "dispute_type": "job", "status": {"$in": ["open", "appealed"]}})
+        if remaining == 0:
+            await db.jobs.update_one(
+                {"id": dispute["job_id"]},
+                {"$set": {"dispute_status": f"resolved_{final_resolution}", "dispute_resolved_at": now}})
     await log_activity(request, admin, "resolve_dispute_appeal", "dispute", dispute_id,
                        f"appeal_resolution={data.resolution}; notes={notes[:300]}")
     return {"message": "Appeal resolved", "dispute_id": dispute_id, "resolution": data.resolution}
