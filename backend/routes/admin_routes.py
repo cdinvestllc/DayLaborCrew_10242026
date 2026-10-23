@@ -1328,6 +1328,7 @@ async def resolve_dispute_appeal(dispute_id: str, data: DisputeResolution, reque
                        f"appeal_resolution={data.resolution}; notes={notes[:300]}")
     return {"message": "Appeal resolved", "dispute_id": dispute_id, "resolution": data.resolution}
 @router.put("/ratings/{rating_id}/moderate")
+async def moderate_rating(rating_id: str, request: Request, admin: dict = Depends(require_admin)):
     """Hide or restore a review; the rated user's average is recalculated and the action logged."""
     body = await request.json()
     hidden = bool(body.get("hidden", True))
