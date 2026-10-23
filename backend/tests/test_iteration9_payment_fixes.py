@@ -1,17 +1,17 @@
-# Iteration 9: retest payment fixes (empty body, origin allow-list, admin-paid boost owner, unpaid status regressions)
-import os
+"""Payment regression tests confined to guarded staging API and MongoDB."""
 import uuid
 import pytest
 import requests
 from pymongo import MongoClient
-from dotenv import load_dotenv, dotenv_values
 
-load_dotenv("/app/backend/.env")
-_ENV = dotenv_values("/app/backend/.env")  # read real DB even if other test modules set DB_NAME defaults
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL").rstrip("/")
+from staging_config import get_seeded_account, get_staging_api_url, get_staging_mongo_settings, get_staging_web_origin
+
+BASE_URL = get_staging_api_url()
+WEB_ORIGIN = get_staging_web_origin()
 API = f"{BASE_URL}/api/payments"
 EVIL = "https://evil.example.com"
-mdb = MongoClient(_ENV["MONGO_URL"])[_ENV["DB_NAME"]]
+MONGO_URI, STAGING_DB_NAME = get_staging_mongo_settings()
+mdb = MongoClient(MONGO_URI, serverSelectionTimeoutMS=10000)[STAGING_DB_NAME]
 
 
 def login(email, password):
@@ -19,24 +19,24 @@ def login(email, password):
     if r.status_code != 200:
         pytest.skip(f"login failed for {email}: {r.status_code}")
     s = requests.Session()
-    s.headers.update({"Authorization": f"Bearer {r.json()['access_token']}", "Origin": BASE_URL})
+    s.headers.update({"Authorization": f"Bearer {r.json()['access_token']}", "Origin": WEB_ORIGIN})
     s.user = r.json().get("user", {})
     return s
 
 
 @pytest.fixture(scope="module")
 def crew():
-    return login("testcrew@thedaylaborers.com", "Crew@1234")
+    return login(*get_seeded_account("CREW"))
 
 
 @pytest.fixture(scope="module")
 def contractor3():
-    return login("contractor3@test.com", "Test@1234")
+    return login(*get_seeded_account("CONTRACTOR3"))
 
 
 @pytest.fixture(scope="module")
 def admin():
-    return login("admin@thedaylaborers.com", "Admin@123")
+    return login(*get_seeded_account("ADMIN"))
 
 
 @pytest.fixture(scope="module")

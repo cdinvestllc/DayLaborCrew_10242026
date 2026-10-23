@@ -1,8 +1,17 @@
 """The checkout adapter truncates int(amount * 100); _stripe_amount must make that exact."""
 import os
+from pathlib import Path
+import sys
 
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(BACKEND_ROOT))
 os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017")
 os.environ.setdefault("DB_NAME", "daylaborcrew_test")
+os.environ.setdefault("JWT_SECRET_KEY", "stripe-amount-test-secret-at-least-32-chars")
+os.environ.setdefault("JWT_EXPIRE_HOURS", "24")
+os.environ.setdefault("CORS_ORIGINS", "http://localhost")
+os.environ.setdefault("EMERGENT_LLM_KEY", "stripe-amount-test-placeholder")
+os.environ.setdefault("TRUSTED_PROXY_HOPS", "1")
 
 from routes.payment_routes import _stripe_amount, _transaction_amount_matches  # noqa: E402
 

@@ -45,7 +45,7 @@ Seed the staging database with the seven accounts above and the minimum fixtures
 - The `TEST20` coupon and plan settings used by the legacy subscription/coupon assertions.
 - A disposable `CONTRACTOR1` account whose verified-contractor flag can be revoked and restored by the integration test.
 
-Use a fresh or resettable staging dataset. The integration suite intentionally writes job records, updates admin fee settings, revokes/restores contractor verification, and creates pending payment/session records. It should not overlap with manual testers or other runs.
+Use a fresh or resettable staging dataset. The integration suite intentionally writes job records, updates admin fee settings, revokes/restores contractor verification, and creates pending payment/session records. The additional payment regression suites (`test_iteration8_payments_e2e.py` and `test_iteration9_payment_fixes.py`) also create unpaid test checkouts. They now read API/web origins, seeded account credentials, and Mongo settings only from the guarded `STAGING_*` configuration; run them only from the manual staging workflow, never against the shared preview. Do not overlap these suites with manual testers or other runs.
 
 ## Run
 

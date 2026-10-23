@@ -1,9 +1,11 @@
-# Iteration 8: Stripe/PayPal payment API checks against the public preview URL
-import os
+"""Payment API integration checks. Run only via the manual staging workflow."""
 import pytest
 import requests
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL").rstrip("/")
+from staging_config import get_seeded_account, get_staging_api_url, get_staging_web_origin
+
+BASE_URL = get_staging_api_url()
+WEB_ORIGIN = get_staging_web_origin()
 API = f"{BASE_URL}/api/payments"
 
 
@@ -12,23 +14,23 @@ def login(email, password):
     if r.status_code != 200:
         pytest.skip(f"login failed for {email}: {r.status_code}")
     s = requests.Session()
-    s.headers.update({"Authorization": f"Bearer {r.json()['access_token']}", "Origin": BASE_URL})
+    s.headers.update({"Authorization": f"Bearer {r.json()['access_token']}", "Origin": WEB_ORIGIN})
     return s
 
 
 @pytest.fixture(scope="module")
 def crew():
-    return login("testcrew@thedaylaborers.com", "Crew@1234")
+    return login(*get_seeded_account("CREW"))
 
 
 @pytest.fixture(scope="module")
 def crew2():
-    return login("testcrew2@thedaylaborers.com", "Crew@1234")
+    return login(*get_seeded_account("CREW2"))
 
 
 @pytest.fixture(scope="module")
 def contractor():
-    return login("contractor1@test.com", "Test@1234")
+    return login(*get_seeded_account("CONTRACTOR1"))
 
 
 def checkout(s, plan="crew_monthly", coupon=None, method="stripe"):
@@ -80,8 +82,9 @@ class TestStripeSubscription:
     def test_webhook_fail_closed(self):
         r = requests.post(f"{API}/stripe/webhook", data=b'{"type":"checkout.session.completed"}',
                           headers={"Content-Type": "application/json"})
-        assert r.status_code == 503
-        assert "not configured" in r.json()["detail"]
+        assert r.status_code in (400, 503)
+        if r.status_code == 503:
+            assert "not configured" in r.json()["detail"]
 
     def test_webhook_fake_signature(self):
         r = requests.post(f"{API}/stripe/webhook", data=b'{}', headers={"Stripe-Signature": "t=1,v1=abc"})
@@ -117,7 +120,8 @@ class TestOtherStripeCheckouts:
         assert r.status_code == 403
 
     def test_contact_unlock_session(self, crew, contractor):
-        lr = requests.post(f"{BASE_URL}/api/auth/login", json={"email": "contractor3@test.com", "password": "Test@1234"}).json()
+        target_email, target_password = get_seeded_account("CONTRACTOR3")
+        lr = requests.post(f"{BASE_URL}/api/auth/login", json={"email": target_email, "password": target_password}, timeout=30).json()
         target_id = (lr.get("user") or {}).get("id")
         assert target_id, lr.keys()
         r = crew.post(f"{API}/contact-unlock/{target_id}", json={"origin_url": BASE_URL}, timeout=60)

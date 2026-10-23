@@ -83,4 +83,6 @@ jobs:
             tests/test_iteration6_csrf_emergency.py \
             tests/test_iteration7_crew_status_refund.py \
             tests/test_new_features.py \
-            tests/test_security.py
+            tests/test_security.py \
+            tests/test_iteration8_payments_e2e.py \
+            tests/test_iteration9_payment_fixes.py
