@@ -312,3 +312,12 @@ def test_dispute_message_rejects_whitespace_only_body():
     with pytest.raises(HTTPException) as err:
         job_routes.normalize_dispute_message("   \n  ")
     assert err.value.status_code == 400
+
+
+
+def test_missing_vendor_checkout_adapter_fails_closed():
+    if payments.STRIPE_CHECKOUT_AVAILABLE:
+        pytest.skip("Vendor checkout SDK is installed in this environment")
+    with pytest.raises(HTTPException) as err:
+        payments.StripeCheckout(api_key="sk_test_example", webhook_url="")
+    assert err.value.status_code == 503

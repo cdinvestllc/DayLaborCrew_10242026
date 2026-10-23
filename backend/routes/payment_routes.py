@@ -11,9 +11,26 @@ from database import db
 from auth import get_current_user, limiter
 from models import CheckoutRequest
 from utils.email_utils import send_subscription_email
-from emergentintegrations.payments.stripe.checkout import (
-    StripeCheckout, CheckoutSessionRequest, CheckoutSessionResponse, CheckoutStatusResponse
-)
+try:
+    from emergentintegrations.payments.stripe.checkout import (
+        StripeCheckout, CheckoutSessionRequest, CheckoutSessionResponse, CheckoutStatusResponse
+    )
+    STRIPE_CHECKOUT_AVAILABLE = True
+except ImportError:
+    # The vendor checkout adapter isn't available from public PyPI. Keep non-payment
+    # routes/tests importable, but fail closed if a checkout endpoint is invoked.
+    STRIPE_CHECKOUT_AVAILABLE = False
+
+    class StripeCheckout:
+        def __init__(self, *args, **kwargs):
+            raise HTTPException(
+                status_code=503,
+                detail="Stripe checkout integration is unavailable; contact the deployment administrator."
+            )
+
+    CheckoutSessionRequest = dict
+    CheckoutSessionResponse = dict
+    CheckoutStatusResponse = dict
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
