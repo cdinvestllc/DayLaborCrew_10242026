@@ -71,7 +71,7 @@ export default function SubscriptionPage() {
           setTimeout(() => navigate(user?.role === "contractor" ? "/contractor/dashboard" : "/crew/dashboard"), 1500);
           return;
         }
-        if (res.data.status === "expired") break;
+        if (res.data.status === "expired" || res.data.payment_status === "verification_failed") break;
       } catch { /* retry */ }
       await new Promise(r => setTimeout(r, 2000));
     }

@@ -4,6 +4,7 @@ import httpx
 import base64
 import asyncio
 import logging
+import math
 import stripe as stripe_sdk
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -230,6 +231,22 @@ async def get_paypal_token() -> str:
     return resp.json()["access_token"]
 
 
+def _stripe_amount(amount) -> float:
+    """Amount to hand the checkout adapter so it charges the exact cents we recorded.
+
+    The adapter converts with int(amount * 100), which truncates binary floats
+    (19.99 -> 1998). Nudge the float up by the smallest step needed so truncation
+    lands on the correctly rounded cent value; the charge never exceeds the price.
+    """
+    cents = int(Decimal(str(amount)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) * 100)
+    value = cents / 100
+    while int(value * 100) < cents:
+        value = math.nextafter(value, math.inf)
+    if int(value * 100) != cents:
+        raise HTTPException(status_code=500, detail="Payment amount could not be prepared")
+    return value
+
+
 def _status_matches(tx: dict | None, status) -> bool:
     """Polling path: only fulfil a paid Stripe session whose amount/currency matches our record."""
     if not tx or getattr(status, "payment_status", None) != "paid":
@@ -239,6 +256,16 @@ def _status_matches(tx: dict | None, status) -> bool:
         return True
     logger.error("Stripe checkout amount/currency did not match its local transaction (polling)")
     return False
+
+
+async def _status_response(session_id: str, status) -> dict:
+    """Report 'paid' only once WE have granted the purchase, never just because Stripe says so."""
+    tx = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0, "payment_status": 1})
+    fulfilled = bool(tx) and tx.get("payment_status") == "paid"
+    payment_status = status.payment_status
+    if payment_status == "paid" and not fulfilled:
+        payment_status = "verification_failed"
+    return {"status": status.status, "payment_status": payment_status, "fulfilled": fulfilled}
 
 
 async def _json_body(request: Request) -> dict:
@@ -381,7 +408,7 @@ async def stripe_create_session(data: CheckoutRequest, current_user: dict = Depe
 
     stripe = StripeCheckout(api_key=_stripe_api_key(), webhook_url=f"{origin}/api/payments/stripe/webhook")
     req = CheckoutSessionRequest(
-        amount=float(final_amount),
+        amount=_stripe_amount(final_amount),
         currency="usd",
         success_url=success_url,
         cancel_url=cancel_url,
@@ -413,7 +440,7 @@ async def stripe_payment_status(session_id: str, request: Request, current_user:
     # Check if already processed
     tx = await get_owned_tx(session_id, current_user)
     if tx and tx.get("payment_status") == "paid":
-        return {"status": "complete", "payment_status": "paid", "already_processed": True}
+        return {"status": "complete", "payment_status": "paid", "already_processed": True, "fulfilled": True}
 
     status = await stripe.get_checkout_status(session_id)
     if status.metadata.get("user_id") not in (None, current_user["id"]) and current_user.get("role") not in ("admin", "super_admin"):
@@ -421,8 +448,7 @@ async def stripe_payment_status(session_id: str, request: Request, current_user:
 
     if _status_matches(tx, status):
         await fulfill_subscription_tx(session_id)
-
-    return {"status": status.status, "payment_status": status.payment_status}
+    return await _status_response(session_id, status)
 
 
 async def fulfill_subscription_tx(session_id: str):
@@ -774,7 +800,7 @@ async def boost_job_stripe(job_id: str, request: Request, current_user: dict = D
 
     stripe = StripeCheckout(api_key=_stripe_api_key(), webhook_url=f"{origin}/api/payments/stripe/webhook")
     req = CheckoutSessionRequest(
-        amount=BOOST_PRICE,
+        amount=_stripe_amount(BOOST_PRICE),
         currency="usd",
         success_url=success_url,
         cancel_url=cancel_url,
@@ -804,14 +830,14 @@ async def boost_stripe_status(session_id: str, request: Request, current_user: d
     stripe = StripeCheckout(api_key=_stripe_api_key(), webhook_url=f"{str(request.base_url)}api/payments/stripe/webhook")
     tx = await get_owned_tx(session_id, current_user)
     if tx and tx.get("payment_status") == "paid":
-        return {"status": "complete", "already_processed": True}
+        return {"status": "complete", "payment_status": "paid", "already_processed": True, "fulfilled": True}
 
     status = await stripe.get_checkout_status(session_id)
     if status.metadata.get("user_id") not in (None, current_user["id"]) and current_user.get("role") not in ("admin", "super_admin"):
         raise HTTPException(status_code=404, detail="Payment not found")
     if _status_matches(tx, status):
         await _fulfill_boost_tx(session_id)
-    return {"status": status.status, "payment_status": status.payment_status}
+    return await _status_response(session_id, status)
 
 
 @router.post("/boost/paypal/{job_id}")
@@ -910,7 +936,7 @@ async def create_verified_contractor_session(request: Request, current_user: dic
 
     stripe = StripeCheckout(api_key=_stripe_api_key(), webhook_url=f"{origin}/api/payments/stripe/webhook")
     req = CheckoutSessionRequest(
-        amount=float(fee),
+        amount=_stripe_amount(fee),
         currency="usd",
         success_url=success_url,
         cancel_url=cancel_url,
@@ -940,7 +966,7 @@ async def verified_contractor_status(session_id: str, request: Request, current_
     # Idempotency check
     tx = await get_owned_tx(session_id, current_user)
     if tx and tx.get("payment_status") == "paid":
-        return {"status": "complete", "payment_status": "paid", "already_processed": True}
+        return {"status": "complete", "payment_status": "paid", "already_processed": True, "fulfilled": True}
 
     status = await stripe.get_checkout_status(session_id)
     if status.metadata.get("user_id") not in (None, current_user["id"]) and current_user.get("role") not in ("admin", "super_admin"):
@@ -949,8 +975,7 @@ async def verified_contractor_status(session_id: str, request: Request, current_
     if _status_matches(tx, status):
         # Shared idempotent fulfillment is also called by the verified webhook.
         await _fulfill_verified_contractor_tx(session_id)
-
-    return {"status": status.status, "payment_status": status.payment_status}
+    return await _status_response(session_id, status)
 
 
 @router.get("/verified-contractor/fee")
@@ -965,7 +990,7 @@ async def get_verified_fee():
 async def _stripe_checkout(request: Request, origin: str, amount: float, success_url: str, cancel_url: str, metadata: dict):
     stripe = StripeCheckout(api_key=_stripe_api_key(), webhook_url=f"{origin}/api/payments/stripe/webhook")
     return await stripe.create_checkout_session(CheckoutSessionRequest(
-        amount=float(amount), currency="usd", success_url=success_url, cancel_url=cancel_url, metadata=metadata))
+        amount=_stripe_amount(amount), currency="usd", success_url=success_url, cancel_url=cancel_url, metadata=metadata))
 
 
 def _origin(request: Request, body: dict) -> str:

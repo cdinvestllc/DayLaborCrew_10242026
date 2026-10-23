@@ -153,3 +153,6 @@ backend:
         - working: "NA"
           agent: "main"
           comment: "PayPal subscription capture now uses decimal amount+currency match; PayPal API errors -> 502; removed inner emergentintegrations import in boost stripe"
+agent_communication:
+    - agent: "main"
+      message: "Iteration 8 fixes: boost return flow (success_url now boost_session_id={CHECKOUT_SESSION_ID}; PayPal return boost_paypal=1&job_id + PayPal token; ContractorDashboard polls/captures and toasts), origin_url allow-listed via _origin() on all session creations, empty-body request.json() guarded (_json_body), admin-paid boost fulfils using tx.job_owner_id, polling paths check amount/currency (_status_matches), seed script validates passwords before any DB write + db-name safety assert, verified-contractor dead code removed, SubscriptionPage: single return handling (useRef), short polling, default to card when PayPal not configured, plan label shown. Plan-switch (update_subscription) left unchanged pending user decision."
