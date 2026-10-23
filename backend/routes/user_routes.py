@@ -162,7 +162,7 @@ async def search_crew(
         results.append(view)
 
     # Randomly spotlight a small number of matching members without changing filters.
-    count = min(2, len(results))
+    count = min(2, max(1, len(results) // 3)) if len(results) > 1 else 0
     featured_ids = set(random.sample([member["id"] for member in results], count)) if count else set()
     for member in results:
         member["search_featured"] = member["id"] in featured_ids

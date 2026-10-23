@@ -308,7 +308,7 @@ export default function CrewDashboard() {
     setSelectedState(abbr);
     if (!abbr) {
       setSearchCenter(null);
-      if (userLocation) setFlyToCoords([userLocation.lng, userLocation.lat]);
+      setFlyToCoords(userLocation ? [userLocation.lng, userLocation.lat] : [-95.7129, 37.0902]);
       return;
     }
     const st = US_STATES.find(s => s.abbr === abbr);
@@ -494,7 +494,7 @@ export default function CrewDashboard() {
                 distanceFilter={radius}
                 searchCenter={searchCenter}
                 flyToCoords={flyToCoords}
-                flyToZoom={searchCenter ? 6 : 13}
+                flyToZoom={searchCenter ? 6 : userLocation ? 13 : 4}
               />
             ) : (
               <div className="space-y-3 max-h-[600px] overflow-y-auto pr-1">
