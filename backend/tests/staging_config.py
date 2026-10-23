@@ -54,6 +54,8 @@ def get_staging_mongo_settings() -> tuple[str, str]:
     if parsed.scheme not in ("mongodb", "mongodb+srv") or not parsed.hostname:
         raise RuntimeError("STAGING_MONGO_URL must be a valid MongoDB connection URI.")
     expected_host = _required("STAGING_MONGO_HOST").lower().rstrip(".")
+    if not _STAGE_MARKER.search(expected_host):
+        raise RuntimeError("STAGING_MONGO_HOST must explicitly identify the staging/test deployment.")
     if parsed.hostname.lower().rstrip(".") != expected_host:
         raise RuntimeError("STAGING_MONGO_URL host does not match the pinned STAGING_MONGO_HOST.")
     db_name = _required("STAGING_DB_NAME")

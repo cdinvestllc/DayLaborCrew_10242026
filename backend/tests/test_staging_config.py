@@ -68,6 +68,17 @@ def test_staging_database_must_be_marked_stage_or_test(monkeypatch):
         get_staging_mongo_settings()
 
 
+def test_staging_mongo_host_must_be_marked_stage_or_test(monkeypatch):
+    _valid_env(monkeypatch)
+    monkeypatch.setenv("STAGING_MONGO_HOST", "production.mongo.example.com")
+    monkeypatch.setenv(
+        "STAGING_MONGO_URL",
+        "mongodb://stage_user:stage_pass@production.mongo.example.com:27017/daylaborcrew_staging",
+    )
+    with pytest.raises(RuntimeError, match="must explicitly identify the staging"):
+        get_staging_mongo_settings()
+
+
 def test_live_stripe_mode_is_rejected(monkeypatch):
     _valid_env(monkeypatch)
     monkeypatch.setenv("STAGING_STRIPE_MODE", "live")

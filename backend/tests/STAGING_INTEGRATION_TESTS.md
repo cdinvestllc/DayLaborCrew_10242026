@@ -21,6 +21,17 @@ Required environment secrets:
 
 Also configure the staging deployment itself to use that database, the same JWT secret, and sandbox Stripe settings. The workflow validates the declared target, pinned Mongo host, database name and Stripe mode before attempting a test. The suites must not be run concurrently against one staging database because the security suite uses a cleanup prefix and other tests modify shared seeded-account state.
 
+## Seed-data prerequisites
+
+Seed the staging database with the seven accounts above and the minimum fixtures expected by the legacy tests:
+- At least three demo jobs for each contractor test account, including Atlanta-area coordinates.
+- At least three Atlanta-area jobs available to the crew account.
+- An in-progress `Drywall Hanging` job assigned to the `CREW2` test account.
+- The `TEST20` coupon and plan settings used by the legacy subscription/coupon assertions.
+- A disposable `CONTRACTOR1` account whose verified-contractor flag can be revoked and restored by the integration test.
+
+Use a fresh or resettable staging dataset. The integration suite intentionally writes job records, updates admin fee settings, revokes/restores contractor verification, and creates pending payment/session records. It should not overlap with manual testers or other runs.
+
 ## Run
 
-After the environment is configured, open Actions → **Legacy Backend Integration Tests (Staging)** → Run workflow, choose the branch `fix/payment-webhook-security-2026-10`, check `confirm_staging`, and start the run. The workflow is manual-only so normal pushes do not attempt destructive integration tests before staging has been provisioned.
+After the environment and seed data are configured, open Actions → **Legacy Backend Integration Tests (Staging)** → Run workflow, choose the branch `fix/payment-webhook-security-2026-10`, check `confirm_staging`, and start the run. The workflow is manual-only so normal pushes do not attempt destructive integration tests before staging has been provisioned.
