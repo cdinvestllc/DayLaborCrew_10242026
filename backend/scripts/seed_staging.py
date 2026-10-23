@@ -127,6 +127,16 @@ def prepare_env(uri: str, db_name: str, accounts: dict):
     os.environ.setdefault("TRUSTED_PROXY_HOPS", "1")
 
 
+def check_passwords(accounts: dict):
+    """Validate every password against the app's policy BEFORE anything is written.
+    Must run after prepare_env(): importing auth binds the database connection."""
+    from auth import validate_password_strength
+    for key, a in accounts.items():
+        err = validate_password_strength(a["password"])
+        if err:
+            fail(f"STAGING_{key}_PASSWORD: {err}")
+
+
 async def ensure_staff(db, acct: dict, hash_password, pwd_context, validate_password_strength):
     err = validate_password_strength(acct["password"])
     if err:
@@ -258,9 +268,12 @@ async def main():
     accounts = resolve_accounts()
     uri, db_name = guard_target(args.allow_localhost)
     prepare_env(uri, db_name, accounts)
+    check_passwords(accounts)
     print(f"[seed-staging] target: {urlsplit(uri).hostname} / {db_name}")
 
-    from database import client
+    from database import client, db as _db
+    if _db.name != db_name:
+        fail(f"Internal safety check: app database is '{_db.name}', expected '{db_name}'.")
     if args.reset and not args.check:
         await client.drop_database(db_name)
         print(f"[seed-staging] dropped database {db_name}")

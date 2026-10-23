@@ -156,6 +156,41 @@ export default function ContractorDashboard() {
     poll();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Job boost: confirm when returning from Stripe (boost_session_id) or PayPal (boost_paypal + token)
+  useEffect(() => {
+    const stripeSession = searchParams.get("boost_session_id");
+    const paypalOrder = searchParams.get("boost_paypal") ? searchParams.get("token") : null;
+    const jobId = searchParams.get("job_id");
+    if (!stripeSession && !paypalOrder) return;
+    let attempts = 0;
+    let stopped = false;
+    const done = (ok, msg) => {
+      stopped = true;
+      setSearchParams({});
+      fetchJobs();
+      ok ? toast.success(msg) : toast.error(msg);
+    };
+    const poll = async () => {
+      if (stopped) return;
+      try {
+        if (paypalOrder) {
+          const res = await axios.post(`${API}/payments/boost/paypal/capture/${paypalOrder}?job_id=${jobId || ""}`);
+          if (res.data.status === "COMPLETED") return done(true, "Payment received! Your job is boosted for 7 days.");
+          return done(false, "PayPal payment was not completed. Your job was not boosted.");
+        }
+        const res = await axios.get(`${API}/payments/boost/stripe/status/${stripeSession}`);
+        if (res.data.already_processed || res.data.payment_status === "paid")
+          return done(true, "Payment received! Your job is boosted for 7 days.");
+        if (res.data.status === "expired") return done(false, "Checkout expired. Your job was not boosted.");
+      } catch { /* retry below */ }
+      attempts++;
+      if (attempts < 8) setTimeout(poll, 2000);
+      else done(false, "Payment status unknown. Refresh in a moment to check your boost.");
+    };
+    poll();
+    return () => { stopped = true; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Emergency Job Start payment: confirm when returning from Stripe checkout
   useEffect(() => {
     const sessionId = searchParams.get("emergency_session");

@@ -230,6 +230,26 @@ async def get_paypal_token() -> str:
     return resp.json()["access_token"]
 
 
+def _status_matches(tx: dict | None, status) -> bool:
+    """Polling path: only fulfil a paid Stripe session whose amount/currency matches our record."""
+    if not tx or getattr(status, "payment_status", None) != "paid":
+        return False
+    if _transaction_amount_matches(tx, getattr(status, "amount_total", None), getattr(status, "currency", None),
+                                   minor_units=True):
+        return True
+    logger.error("Stripe checkout amount/currency did not match its local transaction (polling)")
+    return False
+
+
+async def _json_body(request: Request) -> dict:
+    """Optional JSON body: an empty or malformed body is treated as {} instead of a 500."""
+    try:
+        body = await request.json()
+    except Exception:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
 def _raise_for_paypal(resp: httpx.Response) -> None:
     """Turn PayPal API errors into a clean 502 instead of an unhandled server error."""
     if resp.is_error:
@@ -355,7 +375,7 @@ async def stripe_create_session(data: CheckoutRequest, current_user: dict = Depe
         final_amount, coupon_doc = await apply_coupon(data.coupon_code, data.plan, final_amount)
         coupon_code = data.coupon_code.upper()
 
-    origin = data.origin_url.rstrip("/")
+    origin = _origin(None, {"origin_url": data.origin_url})
     success_url = f"{origin}/subscription?session_id={{CHECKOUT_SESSION_ID}}&method=stripe"
     cancel_url = f"{origin}/subscription"
 
@@ -399,7 +419,7 @@ async def stripe_payment_status(session_id: str, request: Request, current_user:
     if status.metadata.get("user_id") not in (None, current_user["id"]) and current_user.get("role") not in ("admin", "super_admin"):
         raise HTTPException(status_code=404, detail="Payment not found")
 
-    if status.payment_status == "paid":
+    if _status_matches(tx, status):
         await fulfill_subscription_tx(session_id)
 
     return {"status": status.status, "payment_status": status.payment_status}
@@ -425,13 +445,14 @@ async def _fulfill_boost_tx(session_id: str) -> bool:
     if not job_id:
         logger.error("Paid boost transaction has no job reference")
         raise RuntimeError("Boost transaction is missing its job reference")
-    job = await db.jobs.find_one({"id": job_id, "contractor_id": tx["user_id"]}, {"_id": 0, "id": 1})
+    owner_id = tx.get("job_owner_id") or tx["user_id"]  # admins may pay for a contractor's job
+    job = await db.jobs.find_one({"id": job_id, "contractor_id": owner_id}, {"_id": 0, "id": 1})
     if not job:
         logger.error("Paid boost transaction could not find its contractor-owned job")
         raise RuntimeError("Boost job could not be confirmed")
     boost_until = (datetime.now(timezone.utc) + timedelta(days=BOOST_DURATION_DAYS)).isoformat()
     await db.jobs.update_one(
-        {"id": job_id, "contractor_id": tx["user_id"]},
+        {"id": job_id, "contractor_id": owner_id},
         {"$set": {"is_featured": True, "boost_expires_at": boost_until}})
     await db.payment_transactions.update_one(
         {"session_id": session_id, "payment_status": {"$ne": "paid"}},
@@ -637,8 +658,9 @@ async def paypal_create_order(data: CheckoutRequest, current_user: dict = Depend
         coupon_code = data.coupon_code.upper()
 
     access_token = await get_paypal_token()
+    origin = _origin(None, {"origin_url": data.origin_url})
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.post(
             f"{PAYPAL_BASE_URL}/v2/checkout/orders",
             headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
@@ -650,8 +672,8 @@ async def paypal_create_order(data: CheckoutRequest, current_user: dict = Depend
                     "amount": {"currency_code": "USD", "value": f"{final_amount:.2f}"}
                 }],
                 "application_context": {
-                    "return_url": f"{data.origin_url}/subscription?method=paypal&plan={data.plan}",
-                    "cancel_url": f"{data.origin_url}/subscription"
+                    "return_url": f"{origin}/subscription?method=paypal&plan={data.plan}",
+                    "cancel_url": f"{origin}/subscription"
                 }
             }
         )
@@ -746,9 +768,8 @@ async def boost_job_stripe(job_id: str, request: Request, current_user: dict = D
     if job["contractor_id"] != current_user["id"] and current_user.get("role") not in ("admin", "super_admin"):
         raise HTTPException(status_code=403, detail="Not your job")
 
-    body = await request.json()
-    origin = body.get("origin_url", str(request.base_url)).rstrip("/")
-    success_url = f"{origin}/contractor/dashboard?boost_success=1&job_id={job_id}"
+    origin = _origin(request, await _json_body(request))
+    success_url = f"{origin}/contractor/dashboard?boost_session_id={{CHECKOUT_SESSION_ID}}&job_id={job_id}"
     cancel_url = f"{origin}/contractor/dashboard"
 
     stripe = StripeCheckout(api_key=_stripe_api_key(), webhook_url=f"{origin}/api/payments/stripe/webhook")
@@ -766,6 +787,7 @@ async def boost_job_stripe(job_id: str, request: Request, current_user: dict = D
         "user_id": current_user["id"],
         "session_id": session.session_id,
         "job_id": job_id,
+        "job_owner_id": job["contractor_id"],
         "amount": BOOST_PRICE,
         "currency": "usd",
         "plan": "boost",
@@ -787,7 +809,7 @@ async def boost_stripe_status(session_id: str, request: Request, current_user: d
     status = await stripe.get_checkout_status(session_id)
     if status.metadata.get("user_id") not in (None, current_user["id"]) and current_user.get("role") not in ("admin", "super_admin"):
         raise HTTPException(status_code=404, detail="Payment not found")
-    if status.payment_status == "paid":
+    if _status_matches(tx, status):
         await _fulfill_boost_tx(session_id)
     return {"status": status.status, "payment_status": status.payment_status}
 
@@ -800,11 +822,10 @@ async def boost_job_paypal(job_id: str, request: Request, current_user: dict = D
     if job["contractor_id"] != current_user["id"] and current_user.get("role") not in ("admin", "super_admin"):
         raise HTTPException(status_code=403, detail="Not your job")
 
-    body = await request.json()
-    origin = body.get("origin_url", str(request.base_url)).rstrip("/")
+    origin = _origin(request, await _json_body(request))
 
     access_token = await get_paypal_token()
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.post(
             f"{PAYPAL_BASE_URL}/v2/checkout/orders",
             headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
@@ -816,7 +837,7 @@ async def boost_job_paypal(job_id: str, request: Request, current_user: dict = D
                     "amount": {"currency_code": "USD", "value": f"{BOOST_PRICE:.2f}"}
                 }],
                 "application_context": {
-                    "return_url": f"{origin}/contractor/dashboard?boost_success=1&job_id={job_id}&method=paypal",
+                    "return_url": f"{origin}/contractor/dashboard?boost_paypal=1&job_id={job_id}",
                     "cancel_url": f"{origin}/contractor/dashboard"
                 }
             }
@@ -830,6 +851,7 @@ async def boost_job_paypal(job_id: str, request: Request, current_user: dict = D
         "user_id": current_user["id"],
         "session_id": order_id,
         "job_id": job_id,
+        "job_owner_id": job["contractor_id"],
         "amount": BOOST_PRICE,
         "currency": "usd",
         "plan": "boost",
@@ -878,19 +900,11 @@ async def create_verified_contractor_session(request: Request, current_user: dic
     if current_user.get("is_verified_contractor") and expires and expires - datetime.now(timezone.utc) > timedelta(days=30):
         raise HTTPException(status_code=400, detail="Your verification is active. Renewal opens 30 days before it expires.")
 
-    # Check for existing pending transaction (prevent duplicate sessions)
-    existing = await db.payment_transactions.find_one({
-        "user_id": current_user["id"],
-        "plan": "verified_contractor",
-        "payment_status": "pending"
-    })
-
     # Fetch admin-configured fee
     settings = await db.settings.find_one({}, {"_id": 0})
     fee = float((settings or {}).get("verified_contractor_fee", DEFAULT_VERIFIED_FEE))
 
-    body = await request.json()
-    origin = body.get("origin_url", str(request.base_url)).rstrip("/")
+    origin = _origin(request, await _json_body(request))
     success_url = f"{origin}/contractor/dashboard?verified_session_id={{CHECKOUT_SESSION_ID}}"
     cancel_url = f"{origin}/contractor/dashboard"
 
@@ -932,7 +946,7 @@ async def verified_contractor_status(session_id: str, request: Request, current_
     if status.metadata.get("user_id") not in (None, current_user["id"]) and current_user.get("role") not in ("admin", "super_admin"):
         raise HTTPException(status_code=404, detail="Payment not found")
 
-    if status.payment_status == "paid":
+    if _status_matches(tx, status):
         # Shared idempotent fulfillment is also called by the verified webhook.
         await _fulfill_verified_contractor_tx(session_id)
 
@@ -973,8 +987,7 @@ async def create_contact_unlock(target_id: str, request: Request, current_user: 
         raise HTTPException(status_code=404, detail="Profile not found")
     if await has_contact_access(current_user, target):
         raise HTTPException(status_code=400, detail="You already have access to this contact")
-    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
-    origin = _origin(request, body)
+    origin = _origin(request, await _json_body(request))
     session = await _stripe_checkout(
         request, origin, CONTACT_UNLOCK_PRICE,
         f"{origin}/profile/{target_id}?unlock_session_id={{CHECKOUT_SESSION_ID}}", f"{origin}/profile/{target_id}",
@@ -994,8 +1007,8 @@ async def contact_unlock_status(session_id: str, request: Request, current_user:
     if tx.get("payment_status") != "paid":
         stripe = StripeCheckout(api_key=_stripe_api_key(), webhook_url="")
         status = await stripe.get_checkout_status(session_id)
-        if status.payment_status != "paid":
-            return {"payment_status": status.payment_status}
+        if not _status_matches(tx, status):
+            return {"payment_status": status.payment_status if status.payment_status != "paid" else "verification_failed"}
         await _fulfill_contact_unlock_tx(session_id)
     return {"payment_status": "paid", "target_id": tx["target_id"]}
 
@@ -1118,7 +1131,8 @@ async def guest_job_status(session_id: str, request: Request):
         return {"payment_status": "paid", "published": True, "job_id": guest["job_id"]}
     stripe = StripeCheckout(api_key=_stripe_api_key(), webhook_url="")
     status = await stripe.get_checkout_status(session_id)
-    if status.payment_status != "paid" or status.metadata.get("guest_job_id") != guest["id"]:
+    tx = await db.payment_transactions.find_one({"session_id": session_id, "plan": "guest_job"}, {"_id": 0})
+    if not _status_matches(tx, status) or status.metadata.get("guest_job_id") != guest["id"]:
         return {"payment_status": status.payment_status, "published": False}
     job_id = await _publish_paid_guest_job(session_id, guest["id"])
     if not job_id:
@@ -1171,11 +1185,7 @@ async def emergency_checkout(job_id: str, request: Request, current_user: dict =
         raise HTTPException(status_code=404, detail="Job not found")
     if not job.get("is_emergency") or job.get("status") != "pending_payment":
         raise HTTPException(status_code=400, detail="This job doesn't need an emergency payment")
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    origin = _origin(request, body)
+    origin = _origin(request, await _json_body(request))
     fee = await get_emergency_price()
     session = await _stripe_checkout(
         request, origin, fee,
@@ -1200,7 +1210,7 @@ async def emergency_status(session_id: str, current_user: dict = Depends(get_cur
         return {"payment_status": tx["payment_status"], "published": False, "job_id": tx.get("job_id")}
     stripe = StripeCheckout(api_key=_stripe_api_key(), webhook_url="")
     status = await stripe.get_checkout_status(session_id)
-    if status.payment_status == "paid" and status.metadata.get("job_id") == tx["job_id"]:
+    if _status_matches(tx, status) and status.metadata.get("job_id") == tx["job_id"]:
         await fulfill_emergency_tx(session_id)
         return {"payment_status": "paid", "published": True, "job_id": tx["job_id"]}
     if status.status == "expired":
