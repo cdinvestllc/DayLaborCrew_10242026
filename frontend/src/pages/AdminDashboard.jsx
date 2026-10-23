@@ -727,16 +727,16 @@ function AdsTab() {
   const [filter, setFilter] = useState("pending");
   const [loading, setLoading] = useState(true);
 
-  const fetchAds = async (status = filter) => {
+  const fetchAds = useCallback(async (status = filter) => {
     setLoading(true);
     try {
       const res = await axios.get(`${API}/advertisers/admin/ads${status ? `?status=${status}` : ""}`);
       setAds(res.data);
     } catch { toast.error("Failed to load ads"); }
     setLoading(false);
-  };
+  }, [filter]);
 
-  useEffect(() => { fetchAds(filter); }, [filter]);
+  useEffect(() => { fetchAds(); }, [fetchAds]);
 
   const approve = async (id) => {
     await axios.post(`${API}/advertisers/admin/ads/${id}/approve`);
@@ -2054,7 +2054,7 @@ export default function AdminDashboard() {
       setLoading(false);
     };
     load();
-  }, [tab]);
+  }, [tab, fetchAnalytics, fetchUsers, fetchPayments, fetchSettings, userPage, userSearch, userRoleFilter, userStatusFilter]);
 
   const suspendUser = async (userId, isActive) => {
     try {
