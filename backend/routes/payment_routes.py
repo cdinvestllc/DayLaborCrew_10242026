@@ -383,20 +383,26 @@ async def fulfill_subscription_tx(session_id: str):
 
 
 async def _fulfill_boost_tx(session_id: str) -> bool:
-    """Record a boost payment once, then activate only its matching contractor job."""
-    tx = await db.payment_transactions.find_one_and_update(
-        {"session_id": session_id, "plan": "boost", "payment_status": {"$ne": "paid"}},
-        {"$set": {"payment_status": "paid", "updated_at": now_str()}})
-    if not tx:
+    """Activate the recorded job before marking its payment fulfilled, so retries can recover failures."""
+    tx = await db.payment_transactions.find_one(
+        {"session_id": session_id, "plan": "boost"}, {"_id": 0})
+    if not tx or tx.get("payment_status") == "paid":
         return False
     job_id = tx.get("job_id")
     if not job_id:
         logger.error("Paid boost transaction has no job reference")
-        return False
+        raise RuntimeError("Boost transaction is missing its job reference")
+    job = await db.jobs.find_one({"id": job_id, "contractor_id": tx["user_id"]}, {"_id": 0, "id": 1})
+    if not job:
+        logger.error("Paid boost transaction could not find its contractor-owned job")
+        raise RuntimeError("Boost job could not be confirmed")
     boost_until = (datetime.now(timezone.utc) + timedelta(days=BOOST_DURATION_DAYS)).isoformat()
     await db.jobs.update_one(
         {"id": job_id, "contractor_id": tx["user_id"]},
         {"$set": {"is_featured": True, "boost_expires_at": boost_until}})
+    await db.payment_transactions.update_one(
+        {"session_id": session_id, "payment_status": {"$ne": "paid"}},
+        {"$set": {"payment_status": "paid", "updated_at": now_str()}})
     return True
 
 
@@ -431,9 +437,9 @@ async def _fulfill_verified_contractor_tx(session_id: str) -> bool:
 
 
 async def _fulfill_contact_unlock_tx(session_id: str) -> bool:
-    tx = await db.payment_transactions.find_one_and_update(
-        {"session_id": session_id, "plan": "contact_unlock", "payment_status": {"$ne": "paid"}},
-        {"$set": {"payment_status": "paid", "updated_at": now_str()}})
+    """Grant the idempotent unlock before marking payment fulfilled."""
+    tx = await db.payment_transactions.find_one(
+        {"session_id": session_id, "plan": "contact_unlock"}, {"_id": 0})
     if not tx:
         return False
     await db.contact_unlocks.update_one(
@@ -441,6 +447,9 @@ async def _fulfill_contact_unlock_tx(session_id: str) -> bool:
         {"$setOnInsert": {"buyer_id": tx["user_id"], "target_id": tx["target_id"],
                           "session_id": session_id, "paid_at": now_str()}},
         upsert=True)
+    await db.payment_transactions.update_one(
+        {"session_id": session_id, "payment_status": {"$ne": "paid"}},
+        {"$set": {"payment_status": "paid", "updated_at": now_str()}})
     return True
 
 
@@ -452,6 +461,9 @@ async def _fulfill_stripe_checkout_session(session: dict) -> None:
     if not tx:
         # Transient transaction-write races should cause the provider to retry the webhook.
         raise RuntimeError("Stripe checkout session has no local transaction")
+    if tx.get("payment_method") not in (None, "stripe"):
+        logger.error("Stripe event did not match its recorded payment provider")
+        raise HTTPException(status_code=400, detail="Payment provider does not match the recorded transaction")
     if not _transaction_amount_matches(
         tx, session.get("amount_total"), session.get("currency"), minor_units=True
     ):
