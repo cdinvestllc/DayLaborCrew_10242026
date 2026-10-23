@@ -30,7 +30,7 @@ function formatTime(timeStr) {
   } catch { return timeStr; }
 }
 
-export default function JobCard({ job, onAccept, onStart, onComplete, onVerify, onRate, currentUser, isAccepted }) {
+export default function JobCard({ job, onAccept, onStart, onComplete, onClockIn, clockedIn = false, clockingIn = false, onVerify, onRate, currentUser, isAccepted }) {
   const isCrew = currentUser?.role === "crew";
   const isContractor = currentUser?.role === "contractor";
   const crewCount = job.crew_accepted?.length || 0;
@@ -111,6 +111,21 @@ export default function JobCard({ job, onAccept, onStart, onComplete, onVerify, 
           >
             Accept Job
           </button>
+        )}
+        {isCrew && isAccepted && job.status === "in_progress" && !clockedIn && (
+          <button
+            onClick={() => onClockIn?.(job.id)}
+            disabled={clockingIn}
+            className="flex-1 bg-blue-600 text-white font-bold py-2 px-4 rounded-lg text-sm hover:bg-blue-700 transition-colors disabled:opacity-60"
+            data-testid={`clock-in-job-${job.id}`}
+          >
+            {clockingIn ? "Checking location..." : "Clock In"}
+          </button>
+        )}
+        {isCrew && isAccepted && job.status === "in_progress" && clockedIn && (
+          <span className="flex items-center gap-1 text-xs text-emerald-700 dark:text-emerald-400 font-semibold px-2" data-testid={`clocked-in-job-${job.id}`}>
+            <CheckCircle className="w-4 h-4" /> Clocked in
+          </span>
         )}
         {isCrew && isAccepted && job.status === "in_progress" && (
           <button

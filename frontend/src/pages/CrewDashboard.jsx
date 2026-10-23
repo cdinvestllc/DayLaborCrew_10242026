@@ -131,6 +131,8 @@ export default function CrewDashboard() {
   const [view, setView] = useState("map");
   const [jobs, setJobs] = useState([]);
   const [myJobs, setMyJobs] = useState([]);
+  const [clockInStatuses, setClockInStatuses] = useState({});
+  const [clockingInJobs, setClockingInJobs] = useState({});
   // Start from the saved profile location; browser geolocation refines it if allowed
   const [userLocation, setUserLocation] = useState(() =>
     user?.location?.lat != null && user?.location?.lng != null ? { lat: user.location.lat, lng: user.location.lng } : null);
@@ -171,9 +173,18 @@ export default function CrewDashboard() {
   const fetchMyJobs = useCallback(async () => {
     try {
       const res = await axios.get(`${API}/jobs/my-jobs`);
-      setMyJobs(res.data);
+      const ownedJobs = res.data || [];
+      setMyJobs(ownedJobs);
+      const activeJobs = ownedJobs.filter(job => job.status === "in_progress" && job.crew_accepted?.includes(user?.id));
+      const statuses = await Promise.all(activeJobs.map(async job => {
+        try {
+          const status = await axios.get(`${API}/jobs/${job.id}/clock-in/me`);
+          return [job.id, status.data.clocked_in === true];
+        } catch { return [job.id, false]; }
+      }));
+      setClockInStatuses(previous => ({ ...previous, ...Object.fromEntries(statuses) }));
     } catch (e) { console.error(e); }
-  }, []);
+  }, [user?.id]);
 
   const fetchTrialInfo = useCallback(async () => {
     try {
@@ -268,6 +279,32 @@ export default function CrewDashboard() {
       toast.success(`Transportation set to ${value.replace("_", "/")}`);
       setShowTransport(false);
     } catch { toast.error("Failed to update transportation"); }
+  };
+
+  const clockInJob = async (jobId) => {
+    if (!navigator.geolocation) {
+      toast.error("This browser does not support location verification. Contact the contractor for help.");
+      return;
+    }
+    setClockingInJobs(previous => ({ ...previous, [jobId]: true }));
+    navigator.geolocation.getCurrentPosition(async position => {
+      try {
+        const response = await axios.post(`${API}/jobs/${jobId}/clock-in`, {
+          lat: position.coords.latitude,
+          lng: position.coords.longitude,
+          accuracy_meters: Number.isFinite(position.coords.accuracy) ? position.coords.accuracy : null
+        });
+        setClockInStatuses(previous => ({ ...previous, [jobId]: true }));
+        toast.success(response.data.already_clocked_in ? "You are already clocked in." : "Clock-in verified and recorded.");
+      } catch (error) {
+        toast.error(error?.response?.data?.detail || "Could not verify your location for clock-in.");
+      } finally {
+        setClockingInJobs(previous => ({ ...previous, [jobId]: false }));
+      }
+    }, () => {
+      setClockingInJobs(previous => ({ ...previous, [jobId]: false }));
+      toast.error("Location permission is required to clock in. Allow location access and try again.");
+    }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
   };
 
   const completeJob = async (jobId) => {
@@ -583,7 +620,9 @@ export default function CrewDashboard() {
               ) : (
                 <div className="space-y-2">
                   {myJobs.filter(j => ["in_progress", "fulfilled", "open"].includes(j.status)).map(job => (
-                    <JobCard key={job.id} job={job} onComplete={completeJob} currentUser={user} isAccepted={true} />
+                    <JobCard key={job.id} job={job} onComplete={completeJob} onClockIn={clockInJob}
+                      clockedIn={clockInStatuses[job.id] === true} clockingIn={clockingInJobs[job.id] === true}
+                      currentUser={user} isAccepted={true} />
                   ))}
                 </div>
               )}

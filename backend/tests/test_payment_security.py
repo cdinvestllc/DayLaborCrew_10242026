@@ -20,7 +20,8 @@ os.environ.setdefault("TRUSTED_PROXY_HOPS", "1")
 from auth import limiter  # noqa: E402
 from routes import auth_routes as auth_routes  # noqa: E402
 from routes import payment_routes as payments  # noqa: E402
-from models import ProfileUpdate  # noqa: E402
+from routes import job_routes as job_routes  # noqa: E402
+from models import ProfileUpdate, ClockInRequest  # noqa: E402
 from routes.user_routes import _build_crew_search_query  # noqa: E402
 
 
@@ -147,3 +148,36 @@ def test_crew_search_can_include_unavailable_and_unfiltered_members():
     assert _build_crew_search_query(available_only=False) == {
         "role": "crew", "is_active": True
     }
+
+
+def test_clock_in_request_validates_coordinate_accuracy():
+    request = ClockInRequest(lat=33.749, lng=-84.388, accuracy_meters=12.5)
+    assert request.lat == 33.749
+    assert request.lng == -84.388
+    assert request.accuracy_meters == 12.5
+
+
+def test_clock_in_accepts_worker_inside_radius():
+    job = {"location": {"lat": 33.749, "lng": -84.388}}
+    assert job_routes.validate_clock_in_location(job, 33.749, -84.388) == 0
+
+
+def test_clock_in_rejects_worker_outside_radius():
+    job = {"location": {"lat": 33.749, "lng": -84.388}}
+    with pytest.raises(HTTPException) as err:
+        job_routes.validate_clock_in_location(job, 34.0, -84.388)
+    assert err.value.status_code == 403
+
+
+def test_clock_in_fails_closed_when_job_has_no_coordinates():
+    with pytest.raises(HTTPException) as err:
+        job_routes.validate_clock_in_location({"location": {"address": "Atlanta, GA"}}, 33.749, -84.388)
+    assert err.value.status_code == 409
+
+
+@pytest.mark.parametrize("lat,lng", [(None, -84.388), (91, -84.388), (33.749, 181), (float("nan"), -84.388)])
+def test_clock_in_rejects_invalid_gps_coordinates(lat, lng):
+    with pytest.raises(HTTPException) as err:
+        job_routes.validate_clock_in_location(
+            {"location": {"lat": 33.749, "lng": -84.388}}, lat, lng)
+    assert err.value.status_code == 400
