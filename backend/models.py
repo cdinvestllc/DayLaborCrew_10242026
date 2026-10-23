@@ -103,6 +103,12 @@ class JobUpdate(BaseModel):
     status: Optional[str] = None
 
 
+class ClockInRequest(BaseModel):
+    lat: float
+    lng: float
+    accuracy_meters: Optional[float] = Field(None, ge=0, le=10000)
+
+
 # ─── Rating Models ───────────────────────────────────────────────────────────
 
 class RatingCreate(BaseModel):

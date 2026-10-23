@@ -3,7 +3,7 @@ from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from database import db
 from auth import get_current_user, user_to_response
-from models import JobCreate, JobUpdate, RatingCreate
+from models import JobCreate, JobUpdate, RatingCreate, ClockInRequest
 from utils.geocoding import geocode_address, valid_coords, distance_between
 from utils.email_utils import send_job_completion_email
 from utils.ai_utils import generate_smart_job_matches
@@ -14,6 +14,35 @@ logger = logging.getLogger(__name__)
 
 def now_str():
     return datetime.now(timezone.utc).isoformat()
+
+
+CLOCK_IN_RADIUS_MILES = 0.5
+
+
+def validate_clock_in_location(job: dict, lat, lng, radius_miles: float = CLOCK_IN_RADIUS_MILES) -> float:
+    """Return GPS distance to a job or raise if a safe geofence decision is impossible."""
+    provided = valid_coords(lat, lng)
+    if not provided:
+        raise HTTPException(status_code=400, detail="Valid device GPS coordinates are required")
+
+    location = job.get("location") if isinstance(job.get("location"), dict) else {}
+    job_coords = valid_coords(location.get("lat"), location.get("lng"))
+    if not job_coords:
+        job_coords = valid_coords(job.get("lat"), job.get("lng"))
+    if not job_coords:
+        raise HTTPException(
+            status_code=409,
+            detail="Clock-in is unavailable because this job has no valid map location. Ask the contractor to update the job address."
+        )
+
+    distance = distance_between(provided, job_coords)
+    if distance is None or distance > radius_miles:
+        raise HTTPException(
+            status_code=403,
+            detail=f"You must be within {radius_miles:g} mile of the job location to clock in"
+        )
+    return distance
+
 
 router = APIRouter()
 
@@ -300,6 +329,77 @@ async def start_job(job_id: str, current_user: dict = Depends(get_current_user))
     if result.modified_count == 0:
         raise HTTPException(status_code=400, detail="Job cannot be started in current status")
     return {"message": "Job started"}
+
+
+@router.get("/{job_id}/clock-in/me")
+async def get_my_clock_in_status(job_id: str, current_user: dict = Depends(get_current_user)):
+    """Return only the current crew member's clock-in status for an accepted job."""
+    if current_user.get("role") != "crew":
+        raise HTTPException(status_code=403, detail="Only crew members can view crew clock-in status")
+    job = await db.jobs.find_one({"id": job_id}, {"_id": 0, "id": 1, "crew_accepted": 1})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if current_user["id"] not in job.get("crew_accepted", []):
+        raise HTTPException(status_code=403, detail="Not a crew member on this job")
+    record = await db.job_attendance.find_one(
+        {"_id": f"{job_id}:{current_user['id']}"},
+        {"_id": 0, "checked_in_at": 1, "distance_miles": 1, "radius_miles": 1})
+    if not record:
+        return {"clocked_in": False}
+    return {"clocked_in": True, **record}
+
+
+@router.post("/{job_id}/clock-in")
+async def clock_in_job(job_id: str, data: ClockInRequest, current_user: dict = Depends(get_current_user)):
+    """Record a one-time, server-verified proximity check-in for an active job."""
+    if current_user.get("role") != "crew":
+        raise HTTPException(status_code=403, detail="Only crew members can clock in")
+    job = await db.jobs.find_one({"id": job_id}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if current_user["id"] not in job.get("crew_accepted", []):
+        raise HTTPException(status_code=403, detail="Not a crew member on this job")
+    if job.get("status") != "in_progress":
+        raise HTTPException(status_code=400, detail="You can only clock in after the contractor starts the job")
+
+    attendance_id = f"{job_id}:{current_user['id']}"
+    existing = await db.job_attendance.find_one({"_id": attendance_id}, {"_id": 0, "checked_in_at": 1})
+    if existing:
+        return {"message": "Already clocked in", "clocked_in": True,
+                "already_clocked_in": True, "checked_in_at": existing["checked_in_at"]}
+
+    distance = validate_clock_in_location(job, data.lat, data.lng)
+    checked_in_at = now_str()
+    # Store distance and accuracy for audit; do not store raw GPS coordinates.
+    record = {
+        "_id": attendance_id,
+        "job_id": job_id,
+        "crew_id": current_user["id"],
+        "contractor_id": job["contractor_id"],
+        "checked_in_at": checked_in_at,
+        "distance_miles": round(distance, 4),
+        "radius_miles": CLOCK_IN_RADIUS_MILES,
+        "accuracy_meters": data.accuracy_meters,
+        "verification_method": "browser_geolocation",
+    }
+    from pymongo.errors import DuplicateKeyError
+    try:
+        await db.job_attendance.insert_one(record)
+    except DuplicateKeyError:
+        existing = await db.job_attendance.find_one(
+            {"_id": attendance_id}, {"_id": 0, "checked_in_at": 1})
+        if existing:
+            return {"message": "Already clocked in", "clocked_in": True,
+                    "already_clocked_in": True, "checked_in_at": existing["checked_in_at"]}
+        raise HTTPException(status_code=409, detail="Clock-in is already being recorded. Refresh and try again.")
+    return {
+        "message": "Clock-in recorded",
+        "clocked_in": True,
+        "already_clocked_in": False,
+        "checked_in_at": checked_in_at,
+        "distance_miles": round(distance, 4),
+        "radius_miles": CLOCK_IN_RADIUS_MILES,
+    }
 
 
 @router.post("/{job_id}/complete")
