@@ -132,3 +132,24 @@ user_problem_statement_update: "Instant job list update after posting; dark-mode
 agent_communication:
     -agent: "main"
     -message: "CSRF root cause: platform ingress rewrites tdl_session cookie to SameSite=None; Partitioned but tdl_csrf stays SameSite=Lax, so in embedded/cross-site preview the browser keeps session but drops csrf cookie (logs: header=False cookie=False). Fix: CSRF token is now HMAC(secret, session jti) — returned in login/register body (csrf_token) and GET /api/auth/csrf; server accepts header == csrf cookie OR session-bound token. Emergency: POST /api/jobs/ with is_emergency=true -> status pending_payment (hidden from crew) + requires_payment/emergency_fee; POST /api/payments/emergency/stripe/{job_id} -> Stripe URL; GET /api/payments/emergency/status/{session_id} publishes on paid; GET /api/payments/emergency/fee public; admin Settings 'Emergency Job Start Fee' (min 0.50). Demo jobs: 9 is_demo jobs seeded (Atlanta/Decatur/Marietta). SW v3 network-first; /api responses no-store."
+
+## user_problem_statement (current): 1) one-command staging seed script; 2) test Stripe + PayPal payment & confirmation flows end to end on branch fix/payment-webhook-security-2026-10
+backend:
+  - task: "Staging seed script backend/scripts/seed_staging.py"
+    implemented: true
+    working: "NA"
+    file: "backend/scripts/seed_staging.py"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Seeds 7 accounts + fixtures into isolated staging DB, guards, --reset/--check/--allow-localhost, verification report"
+  - task: "Payment flows (Stripe checkout + status fulfilment, PayPal graceful when unconfigured)"
+    implemented: true
+    working: "NA"
+    file: "backend/routes/payment_routes.py"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "PayPal subscription capture now uses decimal amount+currency match; PayPal API errors -> 502; removed inner emergentintegrations import in boost stripe"

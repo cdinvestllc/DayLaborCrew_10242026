@@ -230,6 +230,13 @@ async def get_paypal_token() -> str:
     return resp.json()["access_token"]
 
 
+def _raise_for_paypal(resp: httpx.Response) -> None:
+    """Turn PayPal API errors into a clean 502 instead of an unhandled server error."""
+    if resp.is_error:
+        logger.error("PayPal API request failed with HTTP %s", resp.status_code)
+        raise HTTPException(status_code=502, detail="PayPal could not process this request. Please try again.")
+
+
 async def get_owned_tx(session_id: str, user: dict) -> dict | None:
     """Payment transactions may only be read/finalised by the user who created them."""
     tx = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
@@ -648,7 +655,7 @@ async def paypal_create_order(data: CheckoutRequest, current_user: dict = Depend
                 }
             }
         )
-        resp.raise_for_status()
+        _raise_for_paypal(resp)
         order = resp.json()
 
     order_id = order["id"]
@@ -687,15 +694,17 @@ async def paypal_capture(order_id: str, plan: str, current_user: dict = Depends(
             f"{PAYPAL_BASE_URL}/v2/checkout/orders/{order_id}/capture",
             headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
         )
-        resp.raise_for_status()
+        _raise_for_paypal(resp)
         result = resp.json()
 
     status = result.get("status")
-    captured = (result.get("purchase_units") or [{}])[0].get("payments", {}).get("captures", [{}])[0].get("amount", {})
-    if status == "COMPLETED" and abs(float(captured.get("value", 0)) - float(tx.get("amount", 0))) < 0.01:
-        await fulfill_subscription_tx(order_id)
-    elif status == "COMPLETED":
-        logger.error(f"PayPal capture amount mismatch for order {order_id}")
+    if status == "COMPLETED":
+        captures = (((result.get("purchase_units") or [{}])[0].get("payments") or {}).get("captures") or [])
+        captured = (captures[0] if captures else {}).get("amount") or {}
+        if _transaction_amount_matches(tx, captured.get("value"), captured.get("currency_code")):
+            await fulfill_subscription_tx(order_id)
+        else:
+            logger.error("PayPal capture amount/currency did not match its local transaction")
 
     return {"status": status, "order_id": order_id}
 
@@ -743,7 +752,6 @@ async def boost_job_stripe(job_id: str, request: Request, current_user: dict = D
     cancel_url = f"{origin}/contractor/dashboard"
 
     stripe = StripeCheckout(api_key=_stripe_api_key(), webhook_url=f"{origin}/api/payments/stripe/webhook")
-    from emergentintegrations.payments.stripe.checkout import CheckoutSessionRequest
     req = CheckoutSessionRequest(
         amount=BOOST_PRICE,
         currency="usd",
@@ -813,7 +821,7 @@ async def boost_job_paypal(job_id: str, request: Request, current_user: dict = D
                 }
             }
         )
-        resp.raise_for_status()
+        _raise_for_paypal(resp)
         order = resp.json()
 
     order_id = order["id"]
@@ -847,7 +855,7 @@ async def boost_paypal_capture(order_id: str, job_id: str, current_user: dict = 
             f"{PAYPAL_BASE_URL}/v2/checkout/orders/{order_id}/capture",
             headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
         )
-        resp.raise_for_status()
+        _raise_for_paypal(resp)
         result = resp.json()
 
     if result.get("status") == "COMPLETED":

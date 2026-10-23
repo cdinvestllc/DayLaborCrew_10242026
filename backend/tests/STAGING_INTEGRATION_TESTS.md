@@ -21,6 +21,21 @@ Required environment secrets:
 
 Also configure the staging deployment itself to use that database, the same JWT secret, and sandbox Stripe settings. The workflow validates the declared target, pinned Mongo host, database name and Stripe mode before attempting a test. The suites must not be run concurrently against one staging database because the security suite uses a cleanup prefix and other tests modify shared seeded-account state.
 
+## One-command seeding (`backend/scripts/seed_staging.py`)
+
+The script reads the same `STAGING_*` names as the workflow and creates everything listed in the next section, then prints a pass/fail checklist:
+
+```bash
+export STAGING_MONGO_URL="<staging Mongo URI>"  STAGING_MONGO_HOST="<its host>"  STAGING_DB_NAME=daylaborcrew_staging
+export STAGING_SUPERADMIN_EMAIL=... STAGING_SUPERADMIN_PASSWORD=... STAGING_ADMIN_EMAIL=... STAGING_ADMIN_PASSWORD=...
+# optional: STAGING_CONTRACTOR{1,2,3}_EMAIL/_PASSWORD, STAGING_CREW_EMAIL/_PASSWORD, STAGING_CREW2_EMAIL/_PASSWORD
+# (defaults: contractorN@test.com / Test@1234, testcrew[2]@thedaylaborers.com / Crew@1234)
+python backend/scripts/seed_staging.py --reset   # fresh DB; omit --reset to re-assert idempotently
+python backend/scripts/seed_staging.py --check   # verify only
+```
+
+It refuses to run unless the DB name and Mongo host carry a staging/stage/stg/test marker (use `--allow-localhost` only for a local rehearsal), rejects emails the login API would refuse (e.g. `*.test` domains) and passwords that fail the password policy. Staff passwords must contain upper/lower case, a number and a symbol. If you use non-default contractor/crew emails, set `SEED_DEMO_ACCOUNTS=false` on the staging API so its startup doesn't add the default demo accounts too.
+
 ## Seed-data prerequisites
 
 Seed the staging database with the seven accounts above and the minimum fixtures expected by the legacy tests:
