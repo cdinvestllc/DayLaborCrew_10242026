@@ -56,7 +56,7 @@ def test_staging_api_is_required_and_never_falls_back_to_preview(monkeypatch):
 
 def test_staging_mongo_host_must_match_pinned_host(monkeypatch):
     _valid_env(monkeypatch)
-    monkeypatch.setenv("STAGING_MONGO_HOST", "production.mongo.example.com")
+    monkeypatch.setenv("STAGING_MONGO_HOST", "other.staging.example.test")
     with pytest.raises(RuntimeError, match="does not match the pinned"):
         get_staging_mongo_settings()
 
