@@ -33,7 +33,7 @@ const TRANSPORT_OPTIONS = [
   { value: "other", label: "Other" },
 ];
 
-const DISTANCE_OPTIONS = [5, 10, 20, 50, 100];
+const DISTANCE_OPTIONS = [5, 10, 20, 25, 50, 100];
 
 // ─── Push Notification Subscription Widget ────────────────────────────────────
 function PushNotifyWidget() {
@@ -138,7 +138,7 @@ export default function CrewDashboard() {
   const [tradeFilter, setTradeFilter] = useState("All");
   const [trades, setTrades] = useState(["All"]);
   const [radius, setRadius] = useState(25);
-  const [distanceFilter, setDistanceFilter] = useState(null);
+  const [searchCenter, setSearchCenter] = useState(null);
   const [smartMatch, setSmartMatch] = useState(false);
   const [selectedJob, setSelectedJob] = useState(null);
   const [trialInfo, setTrialInfo] = useState(null);
@@ -154,9 +154,10 @@ export default function CrewDashboard() {
     try {
       const params = new URLSearchParams();
       if (tradeFilter !== "All") params.append("trade", tradeFilter.toLowerCase());
-      if (userLocation) {
-        params.append("lat", userLocation.lat);
-        params.append("lng", userLocation.lng);
+      const origin = searchCenter || userLocation;
+      if (origin && radius !== null) {
+        params.append("lat", origin.lat);
+        params.append("lng", origin.lng);
         params.append("radius", radius);
       }
       if (smartMatch) params.append("smart_match", "true");
@@ -165,7 +166,7 @@ export default function CrewDashboard() {
     } catch (e) {
       console.error("Failed to fetch jobs", e);
     }
-  }, [tradeFilter, userLocation, radius, smartMatch]);
+  }, [tradeFilter, userLocation, searchCenter, radius, smartMatch]);
 
   const fetchMyJobs = useCallback(async () => {
     try {
@@ -282,15 +283,21 @@ export default function CrewDashboard() {
 
   const handleUseMyLocation = () => {
     setGettingLocation(true);
+    if (!navigator.geolocation) {
+      toast.error(t("Location access is not supported by this browser"));
+      setGettingLocation(false);
+      return;
+    }
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         const loc = { lat: pos.coords.latitude, lng: pos.coords.longitude };
         setUserLocation(loc);
+        setSearchCenter(null);
+        setSelectedState("");
         setFlyToCoords([pos.coords.longitude, pos.coords.latitude]);
         sendLocation(loc.lat, loc.lng);
         setGettingLocation(false);
         toast.success(t("Location updated!"));
-        fetchJobs();
       },
       () => { toast.error(t("Location access denied")); setGettingLocation(false); }
     );
@@ -299,9 +306,16 @@ export default function CrewDashboard() {
   const handleStateChange = (e) => {
     const abbr = e.target.value;
     setSelectedState(abbr);
-    if (!abbr) return;
+    if (!abbr) {
+      setSearchCenter(null);
+      if (userLocation) setFlyToCoords([userLocation.lng, userLocation.lat]);
+      return;
+    }
     const st = US_STATES.find(s => s.abbr === abbr);
-    if (st) setFlyToCoords([st.lng, st.lat]);
+    if (st) {
+      setSearchCenter({ lat: st.lat, lng: st.lng });
+      setFlyToCoords([st.lng, st.lat]);
+    }
   };
 
   const shareJob = (job) => {
@@ -312,8 +326,10 @@ export default function CrewDashboard() {
   const acceptedIds = myJobs.map(j => j.id);
 
   // Filter jobs by distance for display
-  const visibleJobs = distanceFilter && userLocation
-    ? jobs.filter(j => j.location?.lat && haversine(userLocation.lat, userLocation.lng, j.location.lat, j.location.lng) <= distanceFilter)
+  const activeSearchCenter = searchCenter || userLocation;
+  const visibleJobs = radius !== null && activeSearchCenter
+    ? jobs.filter(j => j.location?.lat != null && j.location?.lng != null &&
+        haversine(activeSearchCenter.lat, activeSearchCenter.lng, j.location.lat, j.location.lng) <= radius)
     : jobs;
 
   return (
@@ -435,10 +451,11 @@ export default function CrewDashboard() {
           </button>
 
           <select
-            value={distanceFilter || ""}
-            onChange={e => setDistanceFilter(e.target.value ? Number(e.target.value) : null)}
+            value={radius === null ? "" : String(radius)}
+            onChange={e => setRadius(e.target.value ? Number(e.target.value) : null)}
             className="px-3 py-1.5 rounded-lg text-xs font-semibold border bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700 focus:outline-none"
             data-testid="distance-filter"
+            aria-label="Search radius in miles"
           >
             <option value="">{t("Any Distance")}</option>
             {DISTANCE_OPTIONS.map(d => <option key={d} value={d}>{d} miles</option>)}
@@ -457,17 +474,9 @@ export default function CrewDashboard() {
               {t}
             </button>
           ))}
-          <select
-            value={radius}
-            onChange={e => setRadius(Number(e.target.value))}
-            className="px-3 py-1.5 rounded-full text-xs font-semibold border bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700"
-            data-testid="radius-select"
-          >
-            <option value={10}>10 mi radius</option>
-            <option value={25}>25 mi radius</option>
-            <option value={50}>50 mi radius</option>
-            <option value={100}>100 mi radius</option>
-          </select>
+          <span className="px-3 py-1.5 rounded-full text-xs font-semibold bg-blue-50 text-blue-800 border border-blue-100" data-testid="radius-indicator">
+            Map radius: {radius === null ? "Any distance" : `${radius} miles`}
+          </span>
           <button onClick={fetchJobs} className="px-3 py-1.5 rounded-full text-xs font-semibold border bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700 hover:bg-slate-50 flex items-center gap-1" data-testid="refresh-btn">
             <RefreshCw className="w-3 h-3" /> Refresh
           </button>
@@ -482,8 +491,10 @@ export default function CrewDashboard() {
                 userLocation={userLocation}
                 onJobClick={setSelectedJob}
                 height="500px"
-                distanceFilter={distanceFilter}
+                distanceFilter={radius}
+                searchCenter={searchCenter}
                 flyToCoords={flyToCoords}
+                flyToZoom={searchCenter ? 6 : 13}
               />
             ) : (
               <div className="space-y-3 max-h-[600px] overflow-y-auto pr-1">
