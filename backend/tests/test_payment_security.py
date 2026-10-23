@@ -21,7 +21,7 @@ from auth import limiter  # noqa: E402
 from routes import auth_routes as auth_routes  # noqa: E402
 from routes import payment_routes as payments  # noqa: E402
 from routes import job_routes as job_routes  # noqa: E402
-from models import ProfileUpdate, ClockInRequest, DisputeCreate, DisputeResolution  # noqa: E402
+from models import ProfileUpdate, ClockInRequest, DisputeCreate, DisputeResolution, DisputeMessageCreate, DisputeAppealCreate  # noqa: E402
 from routes.user_routes import _build_crew_search_query  # noqa: E402
 
 
@@ -245,3 +245,62 @@ def test_dispute_reason_rejects_whitespace_only_and_trims_padding():
         job_routes.normalize_dispute_reason("          ")
     assert err.value.status_code == 400
     assert job_routes.normalize_dispute_reason("  work was not completed  ") == "work was not completed"
+
+
+
+def test_dispute_conversation_is_limited_to_reporter_and_respondents():
+    dispute = {"reporter_id": "crew-1", "respondent_id": "contractor-1",
+               "respondent_ids": ["contractor-1", "crew-2"]}
+    assert job_routes.can_access_dispute(dispute, "crew-1")
+    assert job_routes.can_access_dispute(dispute, "contractor-1")
+    assert job_routes.can_access_dispute(dispute, "crew-2")
+    assert not job_routes.can_access_dispute(dispute, "stranger")
+
+
+def test_dispute_message_policy_tracks_open_appeal_window_and_final_state():
+    from datetime import datetime, timezone, timedelta
+    now = datetime(2026, 10, 23, tzinfo=timezone.utc)
+    resolved = {"status": "resolved", "resolved_at": (now - timedelta(days=2)).isoformat()}
+    expired = {"status": "resolved", "resolved_at": (now - timedelta(days=8)).isoformat()}
+    assert job_routes.dispute_can_message({"status": "open"}, now)
+    assert job_routes.dispute_can_message({"status": "appealed"}, now)
+    assert job_routes.dispute_can_message(resolved, now)
+    assert not job_routes.dispute_can_message(expired, now)
+    assert not job_routes.dispute_can_message({"status": "appeal_resolved"}, now)
+
+
+def test_dispute_appeal_is_participant_only_once_and_within_seven_days():
+    from datetime import datetime, timezone, timedelta
+    now = datetime(2026, 10, 23, tzinfo=timezone.utc)
+    dispute = {"reporter_id": "crew-1", "respondent_id": "contractor-1", "status": "resolved",
+               "resolved_at": (now - timedelta(days=2)).isoformat()}
+    assert job_routes.dispute_can_appeal(dispute, "crew-1", now)
+    job_routes.validate_dispute_appeal(dispute, "crew-1", now)
+    with pytest.raises(HTTPException) as unauthorized:
+        job_routes.validate_dispute_appeal(dispute, "stranger", now)
+    assert unauthorized.value.status_code == 403
+    with pytest.raises(HTTPException) as expired:
+        job_routes.validate_dispute_appeal(
+            {**dispute, "resolved_at": (now - timedelta(days=9)).isoformat()}, "crew-1", now)
+    assert expired.value.status_code == 409
+    with pytest.raises(HTTPException) as repeated:
+        job_routes.validate_dispute_appeal({**dispute, "appeal": {"reason": "duplicate"}}, "crew-1", now)
+    assert repeated.value.status_code == 409
+
+
+def test_appeal_resolution_actions_are_type_specific():
+    job_routes.validate_appeal_resolution({"dispute_type": "job"}, "uphold_original")
+    job_routes.validate_appeal_resolution({"dispute_type": "job"}, "dismiss")
+    job_routes.validate_appeal_resolution({"dispute_type": "rating", "rating_id": "r1"}, "restore_rating")
+    with pytest.raises(HTTPException):
+        job_routes.validate_appeal_resolution({"dispute_type": "job"}, "hide_rating")
+    with pytest.raises(HTTPException):
+        job_routes.validate_appeal_resolution({"dispute_type": "rating"}, "hide_rating")
+
+
+def test_dispute_conversation_models_limit_empty_or_oversized_input():
+    assert DisputeMessageCreate(body=" Please share the invoice ").body.strip() == "Please share the invoice"
+    with pytest.raises(Exception):
+        DisputeMessageCreate(body="x" * 3001)
+    with pytest.raises(Exception):
+        DisputeAppealCreate(reason="short")

@@ -5,7 +5,7 @@ from utils.storage import save_image
 from models import (
     AdminUserUpdate, TermsUpdate, SettingsUpdate, CMSUpdate,
     TradeCreate, TradeUpdate, BulkEmailRequest, ActivityLogEntry,
-    MessageCreate, MessageReply, CouponCreate, DisputeResolution
+    MessageCreate, MessageReply, CouponCreate, DisputeResolution, DisputeMessageCreate
 )
 from typing import Optional
 import uuid
@@ -13,7 +13,7 @@ import logging
 import csv
 import json
 import io
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from fastapi.responses import StreamingResponse
 
 router = APIRouter()
@@ -1160,7 +1160,7 @@ async def save_push_subscription(request: Request, current_user: dict = Depends(
 
 @router.get("/disputes")
 async def list_disputes(
-    status: str = Query("open", regex="^(open|resolved|all)$"),
+    status: str = Query("open", regex="^(open|resolved|appealed|appeal_resolved|all)$"),
     limit: int = Query(100, ge=1, le=200),
     admin: dict = Depends(require_admin),
 ):
@@ -1208,13 +1208,25 @@ async def resolve_dispute(dispute_id: str, data: DisputeResolution, request: Req
             {"id": rating["rated_id"]},
             {"$set": rating_summary([entry.get("stars") for entry in visible])})
 
-    await db.disputes.update_one(
+    appeal_deadline = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    resolution_message = {
+        "id": str(uuid.uuid4()), "sender_id": admin["id"],
+        "sender_name": admin.get("name") or "DayLaborCrew Support",
+        "sender_role": admin.get("role", "admin"),
+        "body": f"Administrator resolution: {data.resolution.replace('_', ' ')}" +
+                (f"\\nNotes: {notes}" if notes else ""),
+        "message_type": "resolution", "created_at": now,
+    }
+    changed = await db.disputes.update_one(
         {"id": dispute_id, "status": "open"},
         {"$set": {"status": "resolved", "resolution": data.resolution, "resolution_notes": notes,
-                  "resolved_by": admin["id"], "resolved_at": now}})
+                  "resolved_by": admin["id"], "resolved_at": now, "appeal_deadline": appeal_deadline},
+         "$push": {"messages": {"$each": [resolution_message], "$slice": -500}}})
+    if changed.modified_count != 1:
+        raise HTTPException(status_code=409, detail="Dispute changed while resolving. Refresh the queue.")
     if dispute.get("dispute_type") == "job":
         remaining = await db.disputes.count_documents(
-            {"job_id": dispute["job_id"], "dispute_type": "job", "status": "open"})
+            {"job_id": dispute["job_id"], "dispute_type": "job", "status": {"$in": ["open", "appealed"]}})
         if remaining == 0:
             await db.jobs.update_one(
                 {"id": dispute["job_id"], "dispute_status": "open"},
@@ -1224,6 +1236,94 @@ async def resolve_dispute(dispute_id: str, data: DisputeResolution, request: Req
     return {"message": "Dispute resolved", "dispute_id": dispute_id, "resolution": data.resolution}
 
 
+@router.get("/disputes/{dispute_id}/messages")
+async def get_admin_dispute_conversation(dispute_id: str, admin: dict = Depends(require_admin)):
+    dispute = await db.disputes.find_one({"id": dispute_id}, {"_id": 0})
+    if not dispute:
+        raise HTTPException(status_code=404, detail="Dispute not found")
+    from routes.job_routes import dispute_can_message
+    return {"dispute": dispute, "messages": dispute.get("messages", []),
+            "can_message": dispute_can_message(dispute), "can_appeal": False}
+
+
+@router.post("/disputes/{dispute_id}/messages")
+async def post_admin_dispute_message(dispute_id: str, data: DisputeMessageCreate,
+                                     admin: dict = Depends(require_admin)):
+    dispute = await db.disputes.find_one({"id": dispute_id}, {"_id": 0})
+    if not dispute:
+        raise HTTPException(status_code=404, detail="Dispute not found")
+    from routes.job_routes import dispute_can_message, normalize_dispute_message
+    if not dispute_can_message(dispute):
+        raise HTTPException(status_code=409, detail="This dispute conversation is closed")
+    message = {
+        "id": str(uuid.uuid4()), "sender_id": admin["id"],
+        "sender_name": admin.get("name") or "DayLaborCrew Support",
+        "sender_role": admin.get("role", "admin"),
+        "body": normalize_dispute_message(data.body), "message_type": "message",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    changed = await db.disputes.update_one(
+        {"id": dispute_id, "status": dispute.get("status")},
+        {"$push": {"messages": {"$each": [message], "$slice": -500}},
+         "$set": {"updated_at": datetime.now(timezone.utc).isoformat()}})
+    if changed.modified_count != 1:
+        raise HTTPException(status_code=409, detail="Dispute status changed. Refresh and try again.")
+    return {"message": "Reply added", "item": message}
+
+
+@router.post("/disputes/{dispute_id}/resolve-appeal")
+async def resolve_dispute_appeal(dispute_id: str, data: DisputeResolution, request: Request,
+                                 admin: dict = Depends(require_admin)):
+    dispute = await db.disputes.find_one({"id": dispute_id}, {"_id": 0})
+    if not dispute:
+        raise HTTPException(status_code=404, detail="Dispute not found")
+    if dispute.get("status") != "appealed":
+        raise HTTPException(status_code=409, detail="Only appealed disputes can receive an appeal decision")
+    from routes.job_routes import validate_appeal_resolution, rating_summary
+    validate_appeal_resolution(dispute, data.resolution)
+    now = datetime.now(timezone.utc).isoformat()
+    notes = data.notes.strip()
+
+    if dispute.get("dispute_type") == "rating" and data.resolution in {"hide_rating", "restore_rating"}:
+        rating = await db.ratings.find_one({"id": dispute.get("rating_id")}, {"_id": 0})
+        if not rating:
+            raise HTTPException(status_code=409, detail="The disputed rating no longer exists")
+        await db.ratings.update_one(
+            {"id": rating["id"]},
+            {"$set": {"hidden": data.resolution == "hide_rating",
+                      "moderation_reason": notes or f"Appeal resolution: {data.resolution}",
+                      "moderated_by": admin["id"], "moderated_at": now}})
+        visible = await db.ratings.find(
+            {"rated_id": rating["rated_id"], "hidden": {"$ne": True}},
+            {"_id": 0, "stars": 1}).to_list(5000)
+        await db.users.update_one(
+            {"id": rating["rated_id"]},
+            {"$set": rating_summary([entry.get("stars") for entry in visible])})
+
+    final_resolution = dispute.get("resolution") if data.resolution == "uphold_original" else data.resolution
+    appeal_message = {
+        "id": str(uuid.uuid4()), "sender_id": admin["id"],
+        "sender_name": admin.get("name") or "DayLaborCrew Support",
+        "sender_role": admin.get("role", "admin"),
+        "body": f"Appeal decision: {data.resolution.replace('_', ' ')}" +
+                (f"\\nNotes: {notes}" if notes else ""),
+        "message_type": "appeal_resolution", "created_at": now,
+    }
+    changed = await db.disputes.update_one(
+        {"id": dispute_id, "status": "appealed"},
+        {"$set": {"status": "appeal_resolved", "appeal_resolution": data.resolution,
+                  "appeal_resolution_notes": notes, "appeal_resolved_by": admin["id"],
+                  "appeal_resolved_at": now, "resolution": final_resolution},
+         "$push": {"messages": {"$each": [appeal_message], "$slice": -500}}})
+    if changed.modified_count != 1:
+        raise HTTPException(status_code=409, detail="Dispute changed while resolving appeal. Refresh and try again.")
+    if dispute.get("dispute_type") == "job" and data.resolution != "uphold_original":
+        await db.jobs.update_one(
+            {"id": dispute["job_id"]},
+            {"$set": {"dispute_status": f"resolved_{data.resolution}", "dispute_resolved_at": now}})
+    await log_activity(request, admin, "resolve_dispute_appeal", "dispute", dispute_id,
+                       f"appeal_resolution={data.resolution}; notes={notes[:300]}")
+    return {"message": "Appeal resolved", "dispute_id": dispute_id, "resolution": data.resolution}
 @router.put("/ratings/{rating_id}/moderate")
     """Hide or restore a review; the rated user's average is recalculated and the action logged."""
     body = await request.json()

@@ -131,6 +131,15 @@ class DisputeResolution(BaseModel):
     notes: str = Field("", max_length=2000)
 
 
+class DisputeMessageCreate(BaseModel):
+    body: str = Field(..., min_length=1, max_length=3000)
+
+
+class DisputeAppealCreate(BaseModel):
+    reason: str = Field(..., min_length=10, max_length=2000)
+    evidence: Optional[str] = Field(None, max_length=3000)
+
+
 # ─── Payment Models ──────────────────────────────────────────────────────────
 
 class CheckoutRequest(BaseModel):

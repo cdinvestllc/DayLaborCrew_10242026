@@ -3,7 +3,7 @@ from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from database import db
 from auth import get_current_user, user_to_response
-from models import JobCreate, JobUpdate, RatingCreate, ClockInRequest, DisputeCreate
+from models import JobCreate, JobUpdate, RatingCreate, ClockInRequest, DisputeCreate, DisputeMessageCreate, DisputeAppealCreate
 from utils.geocoding import geocode_address, valid_coords, distance_between
 from utils.email_utils import send_job_completion_email
 from utils.ai_utils import generate_smart_job_matches
@@ -486,6 +486,92 @@ def normalize_dispute_reason(reason: str) -> str:
     return normalized
 
 
+def normalize_dispute_message(body: str) -> str:
+    message = body.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+    return message
+
+
+def dispute_participant_ids(dispute: dict) -> set[str]:
+    people = {dispute.get("reporter_id"), dispute.get("respondent_id")}
+    if isinstance(dispute.get("respondent_ids"), list):
+        people.update(dispute["respondent_ids"])
+    people.discard(None)
+    return people
+
+
+def can_access_dispute(dispute: dict, user_id: str) -> bool:
+    return user_id in dispute_participant_ids(dispute)
+
+
+def _parse_dispute_time(value):
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+
+def dispute_appeal_deadline(dispute: dict):
+    explicit = _parse_dispute_time(dispute.get("appeal_deadline"))
+    if explicit:
+        return explicit
+    resolved = _parse_dispute_time(dispute.get("resolved_at"))
+    return resolved + timedelta(days=7) if resolved else None
+
+
+def dispute_can_message(dispute: dict, now=None) -> bool:
+    if dispute.get("status") in {"open", "appealed"}:
+        return True
+    if dispute.get("status") != "resolved":
+        return False
+    deadline = dispute_appeal_deadline(dispute)
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return bool(deadline and current <= deadline)
+
+
+def dispute_can_appeal(dispute: dict, user_id: str, now=None) -> bool:
+    if not can_access_dispute(dispute, user_id) or dispute.get("status") != "resolved" or dispute.get("appeal"):
+        return False
+    deadline = dispute_appeal_deadline(dispute)
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return bool(deadline and current <= deadline)
+
+
+def validate_dispute_appeal(dispute: dict, user_id: str, now=None):
+    if not can_access_dispute(dispute, user_id):
+        raise HTTPException(status_code=403, detail="Only participants in this dispute can appeal")
+    if dispute.get("status") != "resolved":
+        raise HTTPException(status_code=409, detail="Only resolved disputes can be appealed")
+    if dispute.get("appeal"):
+        raise HTTPException(status_code=409, detail="This dispute has already been appealed")
+    deadline = dispute_appeal_deadline(dispute)
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    if not deadline or current > deadline:
+        raise HTTPException(status_code=409, detail="The seven-day appeal window has closed")
+    return deadline
+
+
+def validate_appeal_resolution(dispute: dict, resolution: str) -> None:
+    if dispute.get("dispute_type") == "job":
+        allowed = {"uphold_original", "uphold", "dismiss"}
+    else:
+        allowed = {"uphold_original", "hide_rating", "restore_rating"}
+    if resolution not in allowed:
+        raise HTTPException(status_code=400, detail="Appeal resolution is not valid for this dispute type")
+    if dispute.get("dispute_type") == "rating" and resolution != "uphold_original" and not dispute.get("rating_id"):
+        raise HTTPException(status_code=409, detail="This rating dispute has no linked rating")
+
+
 def validate_dispute_resolution(dispute: dict, resolution: str) -> None:
     allowed = {"uphold", "dismiss"} if dispute.get("dispute_type") == "job" else {"hide_rating", "restore_rating", "dismiss"}
     if resolution not in allowed:
@@ -546,8 +632,90 @@ async def get_my_job_disputes(job_id: str, current_user: dict = Depends(get_curr
     if current_user["id"] != job["contractor_id"] and current_user["id"] not in job.get("crew_accepted", []):
         raise HTTPException(status_code=403, detail="Not part of this job")
     return await db.disputes.find(
-        {"job_id": job_id, "reporter_id": current_user["id"]}, {"_id": 0}
+        {"job_id": job_id, "$or": [
+            {"reporter_id": current_user["id"]},
+            {"respondent_id": current_user["id"]},
+            {"respondent_ids": current_user["id"]},
+        ]},
+        {"_id": 0}
     ).sort("created_at", -1).to_list(50)
+
+
+@router.get("/{job_id}/disputes/{dispute_id}/messages")
+async def get_dispute_conversation(job_id: str, dispute_id: str, current_user: dict = Depends(get_current_user)):
+    dispute = await db.disputes.find_one({"id": dispute_id, "job_id": job_id}, {"_id": 0})
+    if not dispute:
+        raise HTTPException(status_code=404, detail="Dispute not found")
+    if not can_access_dispute(dispute, current_user["id"]):
+        raise HTTPException(status_code=403, detail="Only the parties to this dispute can view its conversation")
+    visible_fields = (
+        "id", "job_id", "job_title", "dispute_type", "category", "reason", "evidence", "rating_id",
+        "reporter_id", "reporter_role", "respondent_id", "respondent_ids", "status", "created_at",
+        "resolution", "resolution_notes", "resolved_at", "appeal_deadline", "appeal",
+        "appeal_resolution", "appeal_resolution_notes", "appeal_resolved_at",
+    )
+    return {
+        "dispute": {key: dispute[key] for key in visible_fields if key in dispute},
+        "messages": dispute.get("messages", []),
+        "can_message": dispute_can_message(dispute),
+        "can_appeal": dispute_can_appeal(dispute, current_user["id"]),
+    }
+
+
+@router.post("/{job_id}/disputes/{dispute_id}/messages")
+async def post_dispute_message(job_id: str, dispute_id: str, data: DisputeMessageCreate,
+                               current_user: dict = Depends(get_current_user)):
+    dispute = await db.disputes.find_one({"id": dispute_id, "job_id": job_id}, {"_id": 0})
+    if not dispute:
+        raise HTTPException(status_code=404, detail="Dispute not found")
+    if not can_access_dispute(dispute, current_user["id"]):
+        raise HTTPException(status_code=403, detail="Only the parties to this dispute can reply")
+    if not dispute_can_message(dispute):
+        raise HTTPException(status_code=409, detail="This dispute conversation is closed")
+    message = {
+        "id": str(uuid.uuid4()), "sender_id": current_user["id"],
+        "sender_name": current_user.get("name") or current_user.get("email") or current_user["id"],
+        "sender_role": current_user.get("role", "user"),
+        "body": normalize_dispute_message(data.body), "message_type": "message", "created_at": now_str(),
+    }
+    result = await db.disputes.update_one(
+        {"id": dispute_id, "status": dispute.get("status")},
+        {"$push": {"messages": {"$each": [message], "$slice": -500}},
+         "$set": {"updated_at": now_str()}})
+    if result.modified_count != 1:
+        raise HTTPException(status_code=409, detail="Dispute status changed. Refresh and try again.")
+    return {"message": "Reply added", "item": message}
+
+
+@router.post("/{job_id}/disputes/{dispute_id}/appeal")
+async def appeal_dispute(job_id: str, dispute_id: str, data: DisputeAppealCreate,
+                         current_user: dict = Depends(get_current_user)):
+    dispute = await db.disputes.find_one({"id": dispute_id, "job_id": job_id}, {"_id": 0})
+    if not dispute:
+        raise HTTPException(status_code=404, detail="Dispute not found")
+    deadline = validate_dispute_appeal(dispute, current_user["id"])
+    reason = normalize_dispute_reason(data.reason)
+    now = now_str()
+    appeal = {
+        "submitted_by": current_user["id"],
+        "submitted_by_name": current_user.get("name") or current_user.get("email") or current_user["id"],
+        "submitted_by_role": current_user.get("role", "user"),
+        "reason": reason, "evidence": data.evidence.strip() if data.evidence else "",
+        "created_at": now, "deadline": deadline.isoformat(),
+    }
+    message = {
+        "id": str(uuid.uuid4()), "sender_id": current_user["id"],
+        "sender_name": appeal["submitted_by_name"], "sender_role": appeal["submitted_by_role"],
+        "body": "Formal appeal submitted: " + reason, "evidence": appeal["evidence"],
+        "message_type": "appeal", "created_at": now,
+    }
+    changed = await db.disputes.update_one(
+        {"id": dispute_id, "status": "resolved", "appeal": {"$exists": False}},
+        {"$set": {"status": "appealed", "appeal": appeal, "updated_at": now},
+         "$push": {"messages": {"$each": [message], "$slice": -500}}})
+    if changed.modified_count != 1:
+        raise HTTPException(status_code=409, detail="This dispute has already been appealed or its status changed")
+    return {"message": "Appeal submitted for administrator review", "appeal": appeal}
 
 
 @router.post("/{job_id}/verify")
@@ -558,7 +726,8 @@ async def verify_job(job_id: str, current_user: dict = Depends(get_current_user)
     if job["contractor_id"] != current_user["id"]:
         raise HTTPException(status_code=403, detail="Only the contractor can verify")
     open_dispute = await db.disputes.find_one(
-        {"job_id": job_id, "dispute_type": "job", "status": "open"}, {"_id": 0, "id": 1})
+        {"job_id": job_id, "dispute_type": "job", "status": {"$in": ["open", "appealed"]}},
+        {"_id": 0, "id": 1})
     if open_dispute:
         raise HTTPException(status_code=409, detail="This job has an open dispute. An administrator must resolve it before completion can be verified.")
     now = now_str()
