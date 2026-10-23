@@ -151,6 +151,7 @@ export default function MapComponent({
   height = "500px",
   distanceFilter = null,
   searchCenter = null,
+  onCenterUser = null,
   flyToCoords = null,
   flyToZoom = 13,
   showOnlyContractorJobs = false,
@@ -166,14 +167,19 @@ export default function MapComponent({
   const centerOnUser = useCallback(() => {
     if (!mapRef.current) return;
     if (toLngLat(userLocation)) {
+      onCenterUser?.(userLocation);
       mapRef.current.flyTo({ center: toLngLat(userLocation), zoom: 12, speed: 1.5 });
     } else if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
-        (pos) => mapRef.current?.flyTo({ center: [pos.coords.longitude, pos.coords.latitude], zoom: 12, speed: 1.5 }),
+        (pos) => {
+          const location = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+          onCenterUser?.(location);
+          mapRef.current?.flyTo({ center: [location.lng, location.lat], zoom: 12, speed: 1.5 });
+        },
         () => {}
       );
     }
-  }, [userLocation]);
+  }, [userLocation, onCenterUser]);
 
   // Init map
   useEffect(() => {
@@ -219,12 +225,12 @@ export default function MapComponent({
     mapRef.current.flyTo({ center: flyToCoords, zoom: flyToZoom, speed: 1.4 });
   }, [flyToCoords, flyToZoom]);
 
-  // Fly to user location when it becomes available
+  // Prefer a manually selected state center even if geolocation arrives afterwards.
   useEffect(() => {
-    const target = toLngLat(userLocation);
+    const target = toLngLat(searchCenter) || toLngLat(userLocation);
     if (!mapRef.current || !target || !mapReady) return;
-    mapRef.current.flyTo({ center: target, zoom: 11, speed: 1.2 });
-  }, [userLocation, mapReady]);
+    mapRef.current.flyTo({ center: target, zoom: searchCenter ? 6 : 11, speed: 1.2 });
+  }, [userLocation, searchCenter, mapReady]);
 
   // Render the selected mileage radius as a geographic polygon.
   useEffect(() => {

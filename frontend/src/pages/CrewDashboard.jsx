@@ -493,6 +493,15 @@ export default function CrewDashboard() {
                 height="500px"
                 distanceFilter={radius}
                 searchCenter={searchCenter}
+                onCenterUser={(loc) => {
+                  if (loc) {
+                    setUserLocation(loc);
+                    sendLocation(loc.lat, loc.lng);
+                    setFlyToCoords([loc.lng, loc.lat]);
+                  }
+                  setSearchCenter(null);
+                  setSelectedState("");
+                }}
                 flyToCoords={flyToCoords}
                 flyToZoom={searchCenter ? 6 : userLocation ? 13 : 4}
               />
