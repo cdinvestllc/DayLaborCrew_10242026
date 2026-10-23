@@ -118,20 +118,8 @@ async def geocode_search(request: Request, q: str = Query(..., min_length=3, max
     return await autocomplete_address(q)
 
 
-@router.get("/crew")
-async def search_crew(
-    trade: Optional[str] = None,
-    name: Optional[str] = None,
-    skill: Optional[str] = None,
-    transportation: Optional[str] = None,
-    state: Optional[str] = None,
-    min_rating: Optional[float] = Query(None, ge=0, le=5),
-    lat: Optional[float] = None,
-    lng: Optional[float] = None,
-    radius: Optional[float] = 50,
-    available_only: bool = True,
-    current_user: dict = Depends(get_current_user)
-):
+def _build_crew_search_query(trade=None, name=None, skill=None, transportation=None,
+                            state=None, min_rating=None, available_only=True):
     import re
     query = {"role": "crew", "is_active": True}
     if trade:
@@ -148,7 +136,26 @@ async def search_crew(
         query["rating"] = {"$gte": min_rating}
     if available_only:
         query["availability"] = True
+    return query
 
+
+@router.get("/crew")
+async def search_crew(
+    trade: Optional[str] = None,
+    name: Optional[str] = None,
+    skill: Optional[str] = None,
+    transportation: Optional[str] = None,
+    state: Optional[str] = None,
+    min_rating: Optional[float] = Query(None, ge=0, le=5),
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+    radius: Optional[float] = 50,
+    available_only: bool = True,
+    current_user: dict = Depends(get_current_user)
+):
+    query = _build_crew_search_query(
+        trade=trade, name=name, skill=skill, transportation=transportation,
+        state=state, min_rating=min_rating, available_only=available_only)
     crew = await db.users.find(query, {"_id": 0, "password_hash": 0}).to_list(200)
     origin = valid_coords(lat, lng)
     radius = min(max(radius or 50, 1), 250)
