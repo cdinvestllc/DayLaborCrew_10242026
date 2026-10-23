@@ -1,6 +1,8 @@
 name: Backend and Frontend Tests
 
 on:
+  push:
+    branches: [fix/payment-webhook-security-2026-10]
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
@@ -58,8 +60,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: yarn
-          cache-dependency-path: frontend/package.json
       - name: Enable Yarn classic
         run: corepack enable
       - name: Install frontend dependencies
