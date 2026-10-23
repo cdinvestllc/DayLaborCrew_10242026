@@ -4,13 +4,14 @@ import uuid
 import pytest
 import requests
 from pymongo import MongoClient
-from dotenv import load_dotenv
+from dotenv import load_dotenv, dotenv_values
 
 load_dotenv("/app/backend/.env")
+_ENV = dotenv_values("/app/backend/.env")  # read real DB even if other test modules set DB_NAME defaults
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL").rstrip("/")
 API = f"{BASE_URL}/api/payments"
 EVIL = "https://evil.example.com"
-mdb = MongoClient(os.environ["MONGO_URL"])[os.environ["DB_NAME"]]
+mdb = MongoClient(_ENV["MONGO_URL"])[_ENV["DB_NAME"]]
 
 
 def login(email, password):
