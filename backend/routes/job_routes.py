@@ -105,8 +105,9 @@ async def list_jobs(
     query = {}
 
     if current_user["role"] == "contractor":
-        # Contractors only see their own jobs
+        # Contractors only see their own non-archived jobs.
         query["contractor_id"] = current_user["id"]
+        query["archived_at"] = {"$exists": False}
     else:
         # Crew only ever sees live jobs (never unpaid, cancelled or other contractors' private states)
         crew_visible = ["open", "fulfilled"]
@@ -133,7 +134,9 @@ async def list_jobs(
 @router.get("/my-jobs")
 async def my_jobs(current_user: dict = Depends(get_current_user)):
     if current_user["role"] == "contractor":
-        jobs = await db.jobs.find({"contractor_id": current_user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(100)
+        jobs = await db.jobs.find(
+            {"contractor_id": current_user["id"], "archived_at": {"$exists": False}},
+            {"_id": 0}).sort("created_at", -1).to_list(100)
     else:
         jobs = await db.jobs.find(
             {"crew_accepted": current_user["id"]},
@@ -179,21 +182,40 @@ async def update_job(job_id: str, data: JobUpdate, current_user: dict = Depends(
 
 @router.delete("/{job_id}")
 async def delete_job(job_id: str, current_user: dict = Depends(get_current_user)):
-    job = await db.jobs.find_one({"id": job_id})
+    job = await db.jobs.find_one({"id": job_id}, {"_id": 0})
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if job["contractor_id"] != current_user["id"] and current_user["role"] not in ("admin", "super_admin"):
         raise HTTPException(status_code=403, detail="Not authorized")
     if job.get("crew_accepted") and current_user["role"] not in ("admin", "super_admin"):
         raise HTTPException(status_code=400, detail="Jobs with accepted crew must be cancelled, not deleted")
-    if job.get("status") == "pending_payment":
-        recent = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
-        if await db.payment_transactions.find_one({"job_id": job_id, "plan": "emergency_job",
-                                                    "payment_status": "pending", "created_at": {"$gt": recent}}):
-            raise HTTPException(status_code=409, detail="A checkout for this job was just started. Finish or abandon it, then try again in 30 minutes.")
-    result = await db.jobs.delete_one({"id": job_id})
-    if result.deleted_count == 1 and job.get("status") == "pending_payment" and job["contractor_id"] == current_user["id"]:
-        # Unpaid emergency job never went live: give the job post back
+
+    pending_emergency = job.get("status") == "pending_payment" and job.get("is_emergency")
+    if pending_emergency:
+        if await db.payment_transactions.find_one({
+            "job_id": job_id, "plan": "emergency_job", "payment_status": "paid"}):
+            raise HTTPException(status_code=409, detail="Payment has completed. Refresh your jobs before deleting.")
+        await db.payment_transactions.update_many(
+            {"job_id": job_id, "plan": "emergency_job", "payment_status": "pending"},
+            {"$set": {"payment_status": "cancelled", "cancelled_at": now_str(),
+                      "cancel_reason": "job_deleted"}})
+
+    delete_filter = {"id": job_id}
+    if pending_emergency:
+        delete_filter["status"] = "pending_payment"
+    result = await db.jobs.delete_one(delete_filter)
+    if result.deleted_count != 1:
+        if pending_emergency:
+            latest = await db.jobs.find_one({"id": job_id}, {"_id": 0, "status": 1})
+            if latest and latest.get("status") == "pending_payment":
+                await db.payment_transactions.update_many(
+                    {"job_id": job_id, "plan": "emergency_job", "payment_status": "cancelled",
+                     "cancel_reason": "job_deleted"},
+                    {"$set": {"payment_status": "pending"},
+                     "$unset": {"cancelled_at": "", "cancel_reason": ""}})
+        raise HTTPException(status_code=409, detail="Job status changed while deleting. Refresh and try again.")
+
+    if pending_emergency and job["contractor_id"] == current_user["id"]:
         from routes.payment_routes import refund_job_post_credit
         await refund_job_post_credit(current_user)
     return {"message": "Job deleted"}
@@ -448,6 +470,33 @@ async def cancel_job(job_id: str, request: Request, current_user: dict = Depends
             await send_job_cancelled_email(crew["email"], crew["name"], job["title"], reason)
 
     return {"message": "Job cancelled. Crew has been notified.", "crew_notified": len(crew_ids)}
+
+
+@router.post("/{job_id}/archive")
+async def archive_job(job_id: str, current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") != "contractor":
+        raise HTTPException(status_code=403, detail="Only contractors can archive jobs")
+    job = await db.jobs.find_one(
+        {"id": job_id}, {"_id": 0, "contractor_id": 1, "status": 1, "archived_at": 1})
+    if not job or job.get("contractor_id") != current_user["id"]:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("status") != "cancelled":
+        raise HTTPException(status_code=400, detail="Only cancelled jobs can be archived")
+    if not job.get("archived_at"):
+        await db.jobs.update_one(
+            {"id": job_id, "contractor_id": current_user["id"], "status": "cancelled",
+             "archived_at": {"$exists": False}},
+            {"$set": {"archived_at": now_str()}})
+    return {"message": "Job archived"}
+
+
+@router.get("/archived/list")
+async def list_archived_jobs(current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") != "contractor":
+        raise HTTPException(status_code=403, detail="Only contractors can view archived jobs")
+    return await db.jobs.find(
+        {"contractor_id": current_user["id"], "status": "cancelled", "archived_at": {"$exists": True}},
+        {"_id": 0}).sort("archived_at", -1).to_list(200)
 
 
 @router.post("/{job_id}/suspend")
