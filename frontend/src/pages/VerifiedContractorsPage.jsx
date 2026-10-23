@@ -167,8 +167,8 @@ function MapView({ contractors, onSelect, selected, userLocation }) {
             attribution: "© <a href='https://www.openstreetmap.org/copyright' target='_blank'>OpenStreetMap</a> contributors" } },
           layers: [{ id: "osm", type: "raster", source: "osm" }],
         },
-        center: userLocation ? [userLocation.lng, userLocation.lat] : [-98.5795, 39.8283],
-        zoom: userLocation ? 7 : 3.5,
+        center: [-98.5795, 39.8283],
+        zoom: 3.5,
         maxBounds: [[-179.9, -85], [179.9, 85]], // full 360° span crashes maplibre 5.x
       });
       map.addControl(new maplibregl.NavigationControl(), "top-right");
