@@ -181,3 +181,15 @@ def test_clock_in_rejects_invalid_gps_coordinates(lat, lng):
         job_routes.validate_clock_in_location(
             {"location": {"lat": 33.749, "lng": -84.388}}, lat, lng)
     assert err.value.status_code == 400
+
+
+def test_clock_in_rejects_inaccurate_gps_readings():
+    with pytest.raises(HTTPException) as err:
+        job_routes.validate_clock_in_accuracy(251)
+    assert err.value.status_code == 400
+    assert "not accurate enough" in err.value.detail
+
+
+def test_clock_in_accepts_missing_accuracy_from_older_clients():
+    assert job_routes.validate_clock_in_accuracy(None) is None
+    assert job_routes.validate_clock_in_accuracy(10) is None
