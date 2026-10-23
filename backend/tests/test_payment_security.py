@@ -304,3 +304,11 @@ def test_dispute_conversation_models_limit_empty_or_oversized_input():
         DisputeMessageCreate(body="x" * 3001)
     with pytest.raises(Exception):
         DisputeAppealCreate(reason="short")
+
+
+
+def test_dispute_message_rejects_whitespace_only_body():
+    assert job_routes.normalize_dispute_message("  Please share the invoice  ") == "Please share the invoice"
+    with pytest.raises(HTTPException) as err:
+        job_routes.normalize_dispute_message("   \n  ")
+    assert err.value.status_code == 400
