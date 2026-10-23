@@ -30,7 +30,7 @@ function formatTime(timeStr) {
   } catch { return timeStr; }
 }
 
-export default function JobCard({ job, onAccept, onStart, onComplete, onClockIn, clockedIn = false, clockingIn = false, onVerify, onRate, currentUser, isAccepted }) {
+export default function JobCard({ job, onAccept, onStart, onComplete, onClockIn, clockedIn = false, clockingIn = false, onVerify, onRate, onReportDispute, currentUser, isAccepted }) {
   const isCrew = currentUser?.role === "crew";
   const isContractor = currentUser?.role === "contractor";
   const crewCount = job.crew_accepted?.length || 0;
@@ -166,6 +166,14 @@ export default function JobCard({ job, onAccept, onStart, onComplete, onClockIn,
             data-testid={`rate-job-${job.id}`}
           >
             Rate Workers
+          </button>
+        )}
+        {(isContractor || (isCrew && isAccepted)) &&
+          ["in_progress", "completed_pending_review", "completed"].includes(job.status) && (
+          <button type="button" onClick={() => onReportDispute?.(job, job.status === "completed" ? "rating" : "job")}
+            className="flex-1 border border-amber-300 text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/30 font-semibold py-2 px-4 rounded-lg text-sm hover:bg-amber-100"
+            data-testid={`report-dispute-${job.id}`}>
+            {job.status === "completed" ? "Challenge Rating" : "Report Issue"}
           </button>
         )}
       </div>

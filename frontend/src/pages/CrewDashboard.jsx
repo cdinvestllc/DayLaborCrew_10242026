@@ -5,6 +5,7 @@ import { useWebSocket } from "../contexts/WebSocketContext";
 import Navbar from "../components/Navbar";
 import MapComponent, { haversine } from "../components/MapComponent";
 import JobCard from "../components/JobCard";
+import DisputeModal from "../components/DisputeModal";
 import { toast } from "sonner";
 import axios from "axios";
 import {
@@ -131,6 +132,7 @@ export default function CrewDashboard() {
   const [view, setView] = useState("map");
   const [jobs, setJobs] = useState([]);
   const [myJobs, setMyJobs] = useState([]);
+  const [disputeJob, setDisputeJob] = useState(null);
   const [clockInStatuses, setClockInStatuses] = useState({});
   const [clockingInJobs, setClockingInJobs] = useState({});
   // Start from the saved profile location; browser geolocation refines it if allowed
@@ -614,14 +616,15 @@ export default function CrewDashboard() {
             </div>
 
             <div className="card p-4">
-              <h3 className="font-bold text-[#050A30] dark:text-white text-sm mb-3" style={{ fontFamily: "Manrope, sans-serif" }}>{t("My Active Jobs")}</h3>
-              {myJobs.filter(j => ["in_progress", "fulfilled", "open"].includes(j.status)).length === 0 ? (
+              <h3 className="font-bold text-[#050A30] dark:text-white text-sm mb-3" style={{ fontFamily: "Manrope, sans-serif" }}>{t("My Jobs & Reviews")}</h3>
+              {myJobs.filter(j => ["in_progress", "fulfilled", "open", "completed_pending_review", "completed"].includes(j.status)).length === 0 ? (
                 <p className="text-slate-400 text-sm">{t("No active jobs. Accept a job to get started!")}</p>
               ) : (
                 <div className="space-y-2">
-                  {myJobs.filter(j => ["in_progress", "fulfilled", "open"].includes(j.status)).map(job => (
+                  {myJobs.filter(j => ["in_progress", "fulfilled", "open", "completed_pending_review", "completed"].includes(j.status)).map(job => (
                     <JobCard key={job.id} job={job} onComplete={completeJob} onClockIn={clockInJob}
                       clockedIn={clockInStatuses[job.id] === true} clockingIn={clockingInJobs[job.id] === true}
+                      onReportDispute={(targetJob, initialType) => setDisputeJob({ job: targetJob, initialType })}
                       currentUser={user} isAccepted={true} />
                   ))}
                 </div>
@@ -641,6 +644,9 @@ export default function CrewDashboard() {
         </div>
 
         {/* Job Detail Modal */}
+        {disputeJob && <DisputeModal job={disputeJob.job} initialType={disputeJob.initialType} currentUser={user}
+          onClose={() => setDisputeJob(null)} onSubmitted={() => { setDisputeJob(null); fetchMyJobs(); }} />}
+
         {selectedJob && (
           <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setSelectedJob(null)}>
             <div className="card max-w-md w-full p-6 relative" onClick={e => e.stopPropagation()}>

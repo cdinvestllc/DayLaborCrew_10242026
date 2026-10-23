@@ -632,8 +632,13 @@ async def rate_user(job_id: str, data: RatingCreate, current_user: dict = Depend
 
 @router.get("/{job_id}/ratings")
 async def get_job_ratings(job_id: str, current_user: dict = Depends(get_current_user)):
-    ratings = await db.ratings.find({"job_id": job_id, "hidden": {"$ne": True}}, {"_id": 0}).to_list(100)
-    return ratings
+    job = await db.jobs.find_one({"id": job_id}, {"_id": 0, "contractor_id": 1, "crew_accepted": 1})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if current_user["id"] != job["contractor_id"] and current_user["id"] not in job.get("crew_accepted", []):
+        raise HTTPException(status_code=403, detail="Only job participants can view job ratings")
+    return await db.ratings.find(
+        {"job_id": job_id, "hidden": {"$ne": True}}, {"_id": 0}).to_list(100)
 
 
 # ─── Contractor: Cancel / Suspend Job ─────────────────────────────────────────

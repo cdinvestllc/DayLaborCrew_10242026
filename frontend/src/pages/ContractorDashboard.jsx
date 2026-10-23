@@ -5,6 +5,7 @@ import { useSearchParams } from "react-router-dom";
 import Navbar from "../components/Navbar";
 import MapComponent from "../components/MapComponent";
 import JobCard from "../components/JobCard";
+import DisputeModal from "../components/DisputeModal";
 import { toast } from "sonner";
 import axios from "axios";
 import {
@@ -65,6 +66,7 @@ export default function ContractorDashboard() {
   const [crewTradeOptions, setCrewTradeOptions] = useState(TRADES);
   const [showJobForm, setShowJobForm] = useState(false);
   const [ratingJob, setRatingJob] = useState(null);
+  const [disputeJob, setDisputeJob] = useState(null);
   const [offerCrew, setOfferCrew] = useState(null);
   const [loading, setLoading] = useState(true);
   // Start from the saved business location; browser geolocation refines it if allowed
@@ -346,6 +348,8 @@ export default function ContractorDashboard() {
       <Navbar />
       {boostJob && <BoostJobModal job={boostJob} onClose={() => setBoostJob(null)} onSuccess={() => { setBoostJob(null); fetchJobs(); }} />}
       {ratingJob && <RatingModal job={ratingJob} onClose={() => setRatingJob(null)} onSubmit={submitRatings} />}
+      {disputeJob && <DisputeModal job={disputeJob.job} initialType={disputeJob.initialType} currentUser={user}
+        onClose={() => setDisputeJob(null)} onSubmitted={() => { setDisputeJob(null); fetchJobs(); }} />}
       {offerCrew && <OfferCrewModal crew={offerCrew} jobs={jobs} onClose={() => setOfferCrew(null)} />}
 
       <div className="max-w-[1400px] mx-auto px-4 py-4">
@@ -567,7 +571,9 @@ export default function ContractorDashboard() {
                 </div>
               ) : jobs.map(job => (
                 <div key={job.id}>
-                  <JobCard job={job} onStart={startJob} onVerify={verifyJob} onRate={setRatingJob} currentUser={user} />
+                  <JobCard job={job} onStart={startJob} onVerify={verifyJob} onRate={setRatingJob}
+                    onReportDispute={(targetJob, initialType) => setDisputeJob({ job: targetJob, initialType })}
+                    currentUser={user} />
                   {job.status === "pending_payment" && (
                     <div className="flex gap-2 mt-1 px-1" data-testid={`pending-payment-actions-${job.id}`}>
                       <button onClick={() => startEmergencyCheckout(job.id)} disabled={payingJobId === job.id}
