@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import Navbar from "../components/Navbar";
@@ -24,7 +24,8 @@ export default function SubscriptionPage() {
   const [plans, setPlans] = useState({});
   const [selectedPlan, setSelectedPlan] = useState("");
   const [loading, setLoading] = useState(false);
-  const [paymentMethod, setPaymentMethod] = useState("paypal");
+  const [paymentMethod, setPaymentMethod] = useState(PAYPAL_VALID ? "paypal" : "stripe");
+  const handledReturn = useRef(null);
   const [couponCode, setCouponCode] = useState("");
   const [couponResult, setCouponResult] = useState(null);
   const [validatingCoupon, setValidatingCoupon] = useState(false);
@@ -58,29 +59,40 @@ export default function SubscriptionPage() {
   }, [refreshUser, navigate, user?.role]);
 
   const verifyStripe = useCallback(async (sessionId) => {
+    // Stripe can report "unpaid" for a few seconds after redirect - poll briefly before giving up.
     setLoading(true);
-    try {
-      const res = await axios.get(`${API}/payments/stripe/status/${sessionId}`);
-      if (res.data.payment_status === "paid") {
-        toast.success("Payment confirmed! Subscription active.");
-        await refreshUser();
-        setTimeout(() => navigate(user?.role === "contractor" ? "/contractor/dashboard" : "/crew/dashboard"), 1500);
-      }
-    } catch { }
-    finally {
-      setLoading(false);
+    for (let attempt = 0; attempt < 8; attempt++) {
+      try {
+        const res = await axios.get(`${API}/payments/stripe/status/${sessionId}`);
+        if (res.data.payment_status === "paid") {
+          toast.success("Payment confirmed! Subscription active.");
+          await refreshUser();
+          setLoading(false);
+          setTimeout(() => navigate(user?.role === "contractor" ? "/contractor/dashboard" : "/crew/dashboard"), 1500);
+          return;
+        }
+        if (res.data.status === "expired" || res.data.payment_status === "verification_failed") break;
+      } catch { /* retry */ }
+      await new Promise(r => setTimeout(r, 2000));
     }
+    setLoading(false);
+    toast.error("We couldn't confirm your payment yet. If you were charged, refresh this page in a minute.");
   }, [refreshUser, navigate, user?.role]);
 
   useEffect(() => {
     const method = params.get("method");
     const plan = params.get("plan");
     const orderId = params.get("order_id") || params.get("token");
+    const sessionId = params.get("session_id");
+    // Handle each payment return only once (the callbacks change when the user refreshes).
+    const key = method === "paypal" ? orderId : sessionId;
+    if (!key || handledReturn.current === key) return;
     if (method === "paypal" && plan && orderId) {
+      handledReturn.current = key;
       capturePayPal(orderId, plan);
     }
-    const sessionId = params.get("session_id");
     if (sessionId && method === "stripe") {
+      handledReturn.current = key;
       verifyStripe(sessionId);
     }
   }, [params, capturePayPal, verifyStripe]);
@@ -251,7 +263,7 @@ export default function SubscriptionPage() {
             {/* Price Summary */}
             <div className="bg-slate-50 dark:bg-slate-800 rounded-xl p-4 mb-4">
               <div className="flex justify-between text-sm mb-1">
-                <span className="text-slate-500 capitalize">{selectedPlan} plan</span>
+                <span className="text-slate-500">{plans[selectedPlan]?.label || selectedPlan} plan</span>
                 <span className={couponResult ? "line-through text-slate-400" : "font-bold text-[#050A30] dark:text-white"}>
                   ${getOriginalPrice()}
                 </span>

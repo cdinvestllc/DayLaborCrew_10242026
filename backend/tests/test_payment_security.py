@@ -522,3 +522,28 @@ def test_payment_capture_requires_matching_provider_amount_and_currency(tx, prov
 )
 def test_checkout_status_must_match_paid_provider_amount_and_currency(tx, status, provider, expected):
     assert payments._checkout_status_matches_transaction(tx, status, provider) is expected
+
+
+
+@pytest.mark.parametrize(
+    "amount,cents",
+    [(19.99, 1999), (79.99, 7999), (0.29, 29), (1.15, 115), (39.99, 3999), (9.99, 999)],
+)
+def test_stripe_checkout_adapter_amount_preserves_exact_cents(amount, cents):
+    adjusted = payments._stripe_amount(amount)
+    assert int(adjusted * 100) == cents
+    assert adjusted - cents / 100 < 1e-6
+
+
+def test_paid_provider_status_is_not_reported_as_fulfilled_without_local_payment(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    import asyncio
+
+    transactions = SimpleNamespace(find_one=AsyncMock(return_value={"payment_status": "pending"}))
+    monkeypatch.setattr(payments, "db", SimpleNamespace(payment_transactions=transactions))
+    response = asyncio.run(payments._status_response(
+        "cs_unfulfilled", SimpleNamespace(status="complete", payment_status="paid")
+    ))
+    assert response["payment_status"] == "verification_failed"
+    assert response["fulfilled"] is False

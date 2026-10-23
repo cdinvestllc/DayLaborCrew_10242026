@@ -178,7 +178,7 @@ async def seed_demo_jobs():
             doc["started_at"] = start.isoformat()
         docs.append(doc)
     await db.jobs.insert_many(docs)
-    for e in ("testcrew@thedaylaborers.com", "testcrew2@thedaylaborers.com"):
+    for e in (c["email"] for c in CREW):
         done = sum(1 for d in docs if d["status"] == "completed" and users[e]["id"] in d["crew_accepted"])
         if done:
             await db.users.update_one({"email": e, "jobs_completed": {"$lt": done}}, {"$set": {"jobs_completed": done}})

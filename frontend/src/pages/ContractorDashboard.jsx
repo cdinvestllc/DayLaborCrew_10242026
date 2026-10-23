@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useAuth } from "../contexts/AuthContext";
 import { useWebSocket } from "../contexts/WebSocketContext";
 import { useSearchParams } from "react-router-dom";
@@ -83,6 +83,7 @@ export default function ContractorDashboard() {
   const [payingJobId, setPayingJobId] = useState(null);
   const [pollingEmergency, setPollingEmergency] = useState(false);
   const [postingJob, setPostingJob] = useState(false);
+  const handledBoostReturn = useRef(null);
   const [jobForm, setJobForm] = useState({
     title: "", description: "", trade: "", crew_needed: 1,
     start_time: "", end_time: "", pay_rate: "", address: "", is_emergency: false, lat: null, lng: null, city: "", state: "", images: []
@@ -152,6 +153,46 @@ export default function ContractorDashboard() {
       attempts++;
       if (attempts < 6) setTimeout(poll, 2000);
       else { setPollingVerified(false); toast.error("Payment status unknown. Refresh and check your profile."); }
+    };
+    poll();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Job boost: confirm when returning from Stripe (boost_session_id) or PayPal (boost_paypal + token)
+  useEffect(() => {
+    const stripeSession = searchParams.get("boost_session_id");
+    const paypalOrder = searchParams.get("boost_paypal") ? searchParams.get("token") : null;
+    const jobId = searchParams.get("job_id");
+    if (!stripeSession && !paypalOrder) return;
+    // Handle each return exactly once (StrictMode runs effects twice in development).
+    const key = stripeSession || paypalOrder;
+    if (handledBoostReturn.current === key) return;
+    handledBoostReturn.current = key;
+    let attempts = 0;
+    let stopped = false;
+    const done = (ok, msg) => {
+      stopped = true;
+      setSearchParams({});
+      fetchJobs();
+      ok ? toast.success(msg) : toast.error(msg);
+    };
+    const poll = async () => {
+      if (stopped) return;
+      try {
+        if (paypalOrder) {
+          const res = await axios.post(`${API}/payments/boost/paypal/capture/${paypalOrder}?job_id=${jobId || ""}`);
+          if (res.data.status === "COMPLETED") return done(true, "Payment received! Your job is boosted for 7 days.");
+          return done(false, "PayPal payment was not completed. Your job was not boosted.");
+        }
+        const res = await axios.get(`${API}/payments/boost/stripe/status/${stripeSession}`);
+        if (res.data.already_processed || res.data.payment_status === "paid")
+          return done(true, "Payment received! Your job is boosted for 7 days.");
+        if (res.data.status === "expired") return done(false, "Checkout expired. Your job was not boosted.");
+        if (res.data.payment_status === "verification_failed")
+          return done(false, "We couldn't verify this payment. Please contact support - your job was not boosted.");
+      } catch { /* retry below */ }
+      attempts++;
+      if (attempts < 8) setTimeout(poll, 2000);
+      else done(false, "Payment status unknown. Refresh in a moment to check your boost.");
     };
     poll();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps

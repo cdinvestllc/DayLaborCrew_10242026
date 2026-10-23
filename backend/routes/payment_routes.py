@@ -4,6 +4,7 @@ import httpx
 import base64
 import asyncio
 import logging
+import math
 import stripe as stripe_sdk
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -79,6 +80,21 @@ def _transaction_amount_matches(tx: dict, amount: object, currency: object, *, m
     return str(currency or "").lower() == expected_currency and actual == expected
 
 
+def _stripe_amount(amount) -> float:
+    """Prepare an exact cent value for a checkout adapter that uses int(amount * 100).
+
+    Binary floats such as 19.99 can multiply to 1998.999..., so move only as far
+    as needed for truncation to yield the recorded number of cents.
+    """
+    cents = int(Decimal(str(amount)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) * 100)
+    value = cents / 100
+    while int(value * 100) < cents:
+        value = math.nextafter(value, math.inf)
+    if int(value * 100) != cents:
+        raise HTTPException(status_code=500, detail="Payment amount could not be prepared")
+    return value
+
+
 def _payment_matches_transaction(
     tx: dict,
     provider: str,
@@ -105,6 +121,22 @@ def _checkout_status_matches_transaction(tx: dict | None, status, provider: str)
         getattr(status, "currency", None),
         minor_units=True,
     )
+
+
+async def _status_response(session_id: str, status) -> dict:
+    """Never report provider-confirmed payment as fulfilled until our transaction is paid."""
+    tx = await db.payment_transactions.find_one(
+        {"session_id": session_id}, {"_id": 0, "payment_status": 1}
+    )
+    fulfilled = bool(tx) and tx.get("payment_status") == "paid"
+    payment_status = getattr(status, "payment_status", "unknown")
+    if payment_status == "paid" and not fulfilled:
+        payment_status = "verification_failed"
+    return {
+        "status": getattr(status, "status", "unknown"),
+        "payment_status": payment_status,
+        "fulfilled": fulfilled,
+    }
 
 
 def _verify_stripe_event(payload: bytes, signature: str, secret: str):
@@ -444,13 +476,13 @@ async def stripe_create_session(data: CheckoutRequest, current_user: dict = Depe
         final_amount, coupon_doc = await apply_coupon(data.coupon_code, data.plan, final_amount)
         coupon_code = data.coupon_code.upper()
 
-    origin = data.origin_url.rstrip("/")
+    origin = _origin(None, {"origin_url": data.origin_url})
     success_url = f"{origin}/subscription?session_id={{CHECKOUT_SESSION_ID}}&method=stripe"
     cancel_url = f"{origin}/subscription"
 
     stripe = StripeCheckout(api_key=_stripe_api_key(), webhook_url=f"{origin}/api/payments/stripe/webhook")
     req = CheckoutSessionRequest(
-        amount=float(final_amount),
+        amount=_stripe_amount(final_amount),
         currency="usd",
         success_url=success_url,
         cancel_url=cancel_url,
@@ -483,7 +515,9 @@ async def stripe_payment_status(session_id: str, request: Request, current_user:
     if not tx or tx.get("payment_method") not in (None, "stripe"):
         raise HTTPException(status_code=404, detail="Payment not found")
     if tx.get("payment_status") == "paid":
-        return {"status": "complete", "payment_status": "paid", "already_processed": True}
+        return {"status": "complete", "payment_status": "paid", "already_processed": True, "fulfilled": True}
+    if tx.get("payment_status") in {"cancelled", "canceled", "refunded"}:
+        raise HTTPException(status_code=409, detail="This payment can no longer be fulfilled")
 
     status = await stripe.get_checkout_status(session_id)
     if status.metadata.get("user_id") not in (None, tx.get("user_id")):
@@ -500,9 +534,9 @@ async def stripe_payment_status(session_id: str, request: Request, current_user:
         updated_tx = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
         if not updated_tx or updated_tx.get("payment_status") != "paid":
             raise HTTPException(status_code=409, detail="Payment is confirmed but fulfillment is not complete; retry status shortly")
-        return {"status": "complete", "payment_status": "paid"}
+        return {"status": "complete", "payment_status": "paid", "fulfilled": True}
 
-    return {"status": status.status, "payment_status": status.payment_status}
+    return await _status_response(session_id, status)
 
 
 async def fulfill_subscription_tx(session_id: str, expected_provider: str | None = None) -> bool:
@@ -565,13 +599,14 @@ async def _fulfill_boost_tx(session_id: str) -> bool:
     if not job_id:
         logger.error("Paid boost transaction has no job reference")
         raise RuntimeError("Boost transaction is missing its job reference")
-    job = await db.jobs.find_one({"id": job_id, "contractor_id": tx["user_id"]}, {"_id": 0, "id": 1})
+    owner_id = tx.get("job_owner_id") or tx["user_id"]
+    job = await db.jobs.find_one({"id": job_id, "contractor_id": owner_id}, {"_id": 0, "id": 1})
     if not job:
         logger.error("Paid boost transaction could not find its contractor-owned job")
         raise RuntimeError("Boost job could not be confirmed")
     boost_until = (datetime.now(timezone.utc) + timedelta(days=BOOST_DURATION_DAYS)).isoformat()
     await db.jobs.update_one(
-        {"id": job_id, "contractor_id": tx["user_id"]},
+        {"id": job_id, "contractor_id": owner_id},
         {"$set": {"is_featured": True, "boost_expires_at": boost_until}})
     await db.payment_transactions.update_one(
         {"session_id": session_id, "payment_status": {"$ne": "paid"}},
@@ -764,6 +799,7 @@ async def paypal_webhook(request: Request):
 @router.post("/paypal/create-order")
 async def paypal_create_order(data: CheckoutRequest, current_user: dict = Depends(get_current_user)):
     await _validate_plan_for_user(data.plan, current_user)
+    origin = _origin(None, {"origin_url": data.origin_url})
 
     plan_info = await resolve_plan_price(data.plan)
     final_amount = plan_info["amount"]
@@ -787,12 +823,12 @@ async def paypal_create_order(data: CheckoutRequest, current_user: dict = Depend
                     "amount": {"currency_code": "USD", "value": f"{final_amount:.2f}"}
                 }],
                 "application_context": {
-                    "return_url": f"{data.origin_url}/subscription?method=paypal&plan={data.plan}",
-                    "cancel_url": f"{data.origin_url}/subscription"
+                    "return_url": f"{origin}/subscription?method=paypal&plan={data.plan}",
+                    "cancel_url": f"{origin}/subscription"
                 }
             }
         )
-        resp.raise_for_status()
+        _raise_for_paypal(resp)
         order = resp.json()
 
     order_id = order["id"]
@@ -835,7 +871,7 @@ async def paypal_capture(order_id: str, plan: str, current_user: dict = Depends(
             f"{PAYPAL_BASE_URL}/v2/checkout/orders/{order_id}/capture",
             headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
         )
-        resp.raise_for_status()
+        _raise_for_paypal(resp)
         result = resp.json()
 
     status = result.get("status")
@@ -889,15 +925,15 @@ async def boost_job_stripe(job_id: str, request: Request, current_user: dict = D
     if job["contractor_id"] != current_user["id"] and current_user.get("role") not in ("admin", "super_admin"):
         raise HTTPException(status_code=403, detail="Not your job")
 
-    body = await request.json()
-    origin = body.get("origin_url", str(request.base_url)).rstrip("/")
+    body = await _json_body(request)
+    origin = _origin(request, body)
     success_url = f"{origin}/contractor/dashboard?boost_success=1&job_id={job_id}"
     cancel_url = f"{origin}/contractor/dashboard"
 
     stripe = StripeCheckout(api_key=_stripe_api_key(), webhook_url=f"{origin}/api/payments/stripe/webhook")
     from emergentintegrations.payments.stripe.checkout import CheckoutSessionRequest
     req = CheckoutSessionRequest(
-        amount=BOOST_PRICE,
+        amount=_stripe_amount(BOOST_PRICE),
         currency="usd",
         success_url=success_url,
         cancel_url=cancel_url,
@@ -910,6 +946,7 @@ async def boost_job_stripe(job_id: str, request: Request, current_user: dict = D
         "user_id": current_user["id"],
         "session_id": session.session_id,
         "job_id": job_id,
+        "job_owner_id": job["contractor_id"],
         "amount": BOOST_PRICE,
         "currency": "usd",
         "plan": "boost",
@@ -928,7 +965,9 @@ async def boost_stripe_status(session_id: str, request: Request, current_user: d
     if not tx or tx.get("plan") != "boost" or tx.get("payment_method") != "stripe":
         raise HTTPException(status_code=404, detail="Payment not found")
     if tx.get("payment_status") == "paid":
-        return {"status": "complete", "payment_status": "paid", "already_processed": True}
+        return {"status": "complete", "payment_status": "paid", "already_processed": True, "fulfilled": True}
+    if tx.get("payment_status") in {"cancelled", "canceled", "refunded"}:
+        raise HTTPException(status_code=409, detail="This payment can no longer be fulfilled")
     if tx.get("payment_status") in {"cancelled", "canceled", "refunded"}:
         raise HTTPException(status_code=409, detail="This payment can no longer be fulfilled")
 
@@ -946,8 +985,8 @@ async def boost_stripe_status(session_id: str, request: Request, current_user: d
         updated_tx = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
         if not updated_tx or updated_tx.get("payment_status") != "paid":
             raise HTTPException(status_code=409, detail="Payment is confirmed but fulfillment is not complete; retry status shortly")
-        return {"status": "complete", "payment_status": "paid"}
-    return {"status": status.status, "payment_status": status.payment_status}
+        return {"status": "complete", "payment_status": "paid", "fulfilled": True}
+    return await _status_response(session_id, status)
 
 
 @router.post("/boost/paypal/{job_id}")
@@ -979,7 +1018,7 @@ async def boost_job_paypal(job_id: str, request: Request, current_user: dict = D
                 }
             }
         )
-        resp.raise_for_status()
+        _raise_for_paypal(resp)
         order = resp.json()
 
     order_id = order["id"]
@@ -1013,7 +1052,7 @@ async def boost_paypal_capture(order_id: str, job_id: str, current_user: dict = 
             f"{PAYPAL_BASE_URL}/v2/checkout/orders/{order_id}/capture",
             headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
         )
-        resp.raise_for_status()
+        _raise_for_paypal(resp)
         result = resp.json()
 
     if result.get("status") == "COMPLETED":
@@ -1048,14 +1087,14 @@ async def create_verified_contractor_session(request: Request, current_user: dic
     settings = await db.settings.find_one({}, {"_id": 0})
     fee = float((settings or {}).get("verified_contractor_fee", DEFAULT_VERIFIED_FEE))
 
-    body = await request.json()
-    origin = body.get("origin_url", str(request.base_url)).rstrip("/")
+    body = await _json_body(request)
+    origin = _origin(request, body)
     success_url = f"{origin}/contractor/dashboard?verified_session_id={{CHECKOUT_SESSION_ID}}"
     cancel_url = f"{origin}/contractor/dashboard"
 
     stripe = StripeCheckout(api_key=_stripe_api_key(), webhook_url=f"{origin}/api/payments/stripe/webhook")
     req = CheckoutSessionRequest(
-        amount=float(fee),
+        amount=_stripe_amount(fee),
         currency="usd",
         success_url=success_url,
         cancel_url=cancel_url,
@@ -1081,21 +1120,27 @@ async def create_verified_contractor_session(request: Request, current_user: dic
 @router.get("/verified-contractor/status/{session_id}")
 async def verified_contractor_status(session_id: str, request: Request, current_user: dict = Depends(get_current_user)):
     stripe = StripeCheckout(api_key=_stripe_api_key(), webhook_url=f"{str(request.base_url)}api/payments/stripe/webhook")
-
-    # Idempotency check
     tx = await get_owned_tx(session_id, current_user)
-    if tx and tx.get("payment_status") == "paid":
-        return {"status": "complete", "payment_status": "paid", "already_processed": True}
+    if not tx or tx.get("plan") != "verified_contractor" or tx.get("payment_method") != "stripe":
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if tx.get("payment_status") == "paid":
+        return {"status": "complete", "payment_status": "paid", "already_processed": True, "fulfilled": True}
+    if tx.get("payment_status") in {"cancelled", "canceled", "refunded"}:
+        raise HTTPException(status_code=409, detail="This payment can no longer be fulfilled")
 
     status = await stripe.get_checkout_status(session_id)
-    if status.metadata.get("user_id") not in (None, current_user["id"]) and current_user.get("role") not in ("admin", "super_admin"):
+    metadata = getattr(status, "metadata", {}) or {}
+    if metadata.get("user_id") != tx.get("user_id") or metadata.get("type") != "verified_contractor":
         raise HTTPException(status_code=404, detail="Payment not found")
-
     if status.payment_status == "paid":
-        # Shared idempotent fulfillment is also called by the verified webhook.
+        if not _checkout_status_matches_transaction(tx, status, "stripe"):
+            logger.error("Stripe verification status did not match its recorded provider, amount, or currency")
+            raise HTTPException(status_code=409, detail="Payment does not match the recorded transaction")
         await _fulfill_verified_contractor_tx(session_id)
-
-    return {"status": status.status, "payment_status": status.payment_status}
+        updated_tx = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
+        if updated_tx and updated_tx.get("payment_status") == "paid":
+            return {"status": "complete", "payment_status": "paid", "fulfilled": True}
+    return await _status_response(session_id, status)
 
 
 @router.get("/verified-contractor/fee")
@@ -1113,7 +1158,23 @@ async def _stripe_checkout(request: Request, origin: str, amount: float, success
         amount=float(amount), currency="usd", success_url=success_url, cancel_url=cancel_url, metadata=metadata))
 
 
-def _origin(request: Request, body: dict) -> str:
+async def _json_body(request: Request) -> dict:
+    """Return {} for optional or malformed JSON rather than a server error."""
+    try:
+        body = await request.json()
+    except Exception:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _raise_for_paypal(resp: httpx.Response) -> None:
+    """Convert PayPal HTTP error responses into a safe 502 response."""
+    if resp.is_error:
+        logger.error("PayPal API request failed with HTTP %s", resp.status_code)
+        raise HTTPException(status_code=502, detail="PayPal could not process this request. Please try again.")
+
+
+def _origin(request: Request | None, body: dict) -> str:
     from urllib.parse import urlparse
     origin = (body or {}).get("origin_url") or ""
     allowed = [o.strip().strip('"').rstrip("/") for o in os.environ["CORS_ORIGINS"].split(",")]
@@ -1148,15 +1209,28 @@ async def create_contact_unlock(target_id: str, request: Request, current_user: 
 @router.get("/contact-unlock/status/{session_id}")
 async def contact_unlock_status(session_id: str, request: Request, current_user: dict = Depends(get_current_user)):
     tx = await get_owned_tx(session_id, current_user)
-    if not tx or tx.get("plan") != "contact_unlock":
+    if not tx or tx.get("plan") != "contact_unlock" or tx.get("payment_method") != "stripe":
         raise HTTPException(status_code=404, detail="Payment not found")
-    if tx.get("payment_status") != "paid":
-        stripe = StripeCheckout(api_key=_stripe_api_key(), webhook_url="")
-        status = await stripe.get_checkout_status(session_id)
-        if status.payment_status != "paid":
-            return {"payment_status": status.payment_status}
-        await _fulfill_contact_unlock_tx(session_id)
-    return {"payment_status": "paid", "target_id": tx["target_id"]}
+    if tx.get("payment_status") == "paid":
+        return {"payment_status": "paid", "target_id": tx["target_id"], "fulfilled": True}
+    if tx.get("payment_status") in {"cancelled", "canceled", "refunded"}:
+        raise HTTPException(status_code=409, detail="This payment can no longer be fulfilled")
+
+    stripe = StripeCheckout(api_key=_stripe_api_key(), webhook_url="")
+    status = await stripe.get_checkout_status(session_id)
+    metadata = getattr(status, "metadata", {}) or {}
+    if metadata.get("user_id") != tx.get("user_id") or metadata.get("target_id") != tx.get("target_id"):
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if status.payment_status != "paid":
+        return await _status_response(session_id, status)
+    if not _checkout_status_matches_transaction(tx, status, "stripe"):
+        logger.error("Stripe contact-unlock status did not match its recorded provider, amount, or currency")
+        raise HTTPException(status_code=409, detail="Payment does not match the recorded transaction")
+    await _fulfill_contact_unlock_tx(session_id)
+    updated_tx = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
+    if not updated_tx or updated_tx.get("payment_status") != "paid":
+        return {"payment_status": "verification_failed", "target_id": tx["target_id"], "fulfilled": False}
+    return {"payment_status": "paid", "target_id": tx["target_id"], "fulfilled": True}
 
 
 # ─── Guest Job Post ($9.99, no account) ──────────────────────────────────────
@@ -1271,18 +1345,29 @@ async def _publish_paid_guest_job(session_id: str, expected_guest_id: str | None
 @limiter.limit("30/minute")
 async def guest_job_status(session_id: str, request: Request):
     guest = await db.guest_jobs.find_one({"session_id": session_id}, {"_id": 0})
-    if not guest:
+    tx = await db.payment_transactions.find_one(
+        {"session_id": session_id, "plan": "guest_job", "payment_method": "stripe"}, {"_id": 0}
+    )
+    if not guest or not tx:
         raise HTTPException(status_code=404, detail="Payment not found")
-    if guest["status"] == "published":
-        return {"payment_status": "paid", "published": True, "job_id": guest["job_id"]}
+    if guest["status"] == "published" and tx.get("payment_status") == "paid":
+        return {"payment_status": "paid", "published": True, "job_id": guest["job_id"], "fulfilled": True}
     stripe = StripeCheckout(api_key=_stripe_api_key(), webhook_url="")
     status = await stripe.get_checkout_status(session_id)
-    if status.payment_status != "paid" or status.metadata.get("guest_job_id") != guest["id"]:
-        return {"payment_status": status.payment_status, "published": False}
+    metadata = getattr(status, "metadata", {}) or {}
+    if metadata.get("guest_job_id") != guest["id"]:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if status.payment_status != "paid":
+        return {"payment_status": status.payment_status, "published": False, "fulfilled": False}
+    if not _checkout_status_matches_transaction(tx, status, "stripe"):
+        logger.error("Stripe guest-job status did not match its recorded provider, amount, or currency")
+        return {"payment_status": "verification_failed", "published": False, "fulfilled": False}
     job_id = await _publish_paid_guest_job(session_id, guest["id"])
-    if not job_id:
-        return {"payment_status": "paid", "published": False}
-    return {"payment_status": "paid", "published": True, "job_id": job_id}
+    updated_tx = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
+    fulfilled = bool(job_id) and bool(updated_tx) and updated_tx.get("payment_status") == "paid"
+    if not fulfilled:
+        return {"payment_status": "verification_failed", "published": False, "fulfilled": False}
+    return {"payment_status": "paid", "published": True, "job_id": job_id, "fulfilled": True}
 
 
 # ─── Emergency Job Start fee (one-time, admin-configurable, Stripe) ──────────
@@ -1359,9 +1444,19 @@ async def emergency_status(session_id: str, current_user: dict = Depends(get_cur
         return {"payment_status": tx["payment_status"], "published": False, "job_id": tx.get("job_id")}
     stripe = StripeCheckout(api_key=_stripe_api_key(), webhook_url="")
     status = await stripe.get_checkout_status(session_id)
-    if status.payment_status == "paid" and status.metadata.get("job_id") == tx["job_id"]:
+    metadata = getattr(status, "metadata", {}) or {}
+    if metadata.get("user_id") != tx.get("user_id") or metadata.get("job_id") != tx["job_id"]:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if status.payment_status == "paid":
+        if not _checkout_status_matches_transaction(tx, status, "stripe"):
+            logger.error("Stripe emergency status did not match its recorded provider, amount, or currency")
+            return {"payment_status": "verification_failed", "published": False, "job_id": tx["job_id"], "fulfilled": False}
         await fulfill_emergency_tx(session_id)
-        return {"payment_status": "paid", "published": True, "job_id": tx["job_id"]}
+        updated_tx = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
+        fulfilled = bool(updated_tx) and updated_tx.get("payment_status") == "paid"
+        return {"payment_status": "paid" if fulfilled else "verification_failed",
+                "published": fulfilled, "job_id": tx["job_id"], "fulfilled": fulfilled}
     if status.status == "expired":
         await db.payment_transactions.update_one({"session_id": session_id}, {"$set": {"payment_status": "expired"}})
-    return {"payment_status": status.payment_status, "status": status.status, "published": False, "job_id": tx["job_id"]}
+    return {"payment_status": status.payment_status, "status": status.status, "published": False,
+            "job_id": tx["job_id"], "fulfilled": False}
