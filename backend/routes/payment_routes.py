@@ -454,6 +454,30 @@ async def _fulfill_contact_unlock_tx(session_id: str) -> bool:
     return True
 
 
+async def _refund_cancelled_emergency_payment(session_id: str, session: dict) -> None:
+    """Refund a deleted unpaid emergency job if its checkout succeeds after cancellation."""
+    payment_intent = session.get("payment_intent")
+    if isinstance(payment_intent, dict):
+        payment_intent = payment_intent.get("id")
+    if not payment_intent:
+        raise RuntimeError("Cancelled emergency payment is missing its payment intent")
+    try:
+        refund = await asyncio.to_thread(
+            stripe_sdk.Refund.create,
+            payment_intent=payment_intent,
+            reason="requested_by_customer",
+            api_key=_stripe_api_key(),
+            idempotency_key=f"deleted-emergency-job-{session_id}",
+        )
+    except Exception as exc:
+        logger.error("Cancelled emergency payment refund failed: %s", type(exc).__name__)
+        raise RuntimeError("Cancelled emergency payment refund failed") from None
+    await db.payment_transactions.update_one(
+        {"session_id": session_id, "payment_status": "cancelled"},
+        {"$set": {"payment_status": "refunded", "provider_refund_id": refund.id,
+                  "refunded_at": now_str(), "updated_at": now_str()}})
+
+
 async def _fulfill_stripe_checkout_session(session: dict) -> None:
     session_id = session.get("id")
     if not session_id:
@@ -472,26 +496,7 @@ async def _fulfill_stripe_checkout_session(session: dict) -> None:
         raise HTTPException(status_code=400, detail="Payment does not match the recorded transaction")
     if tx.get("payment_status") in {"cancelled", "canceled", "refunded"}:
         if tx.get("payment_status") == "cancelled" and tx.get("plan") == "emergency_job":
-            payment_intent = session.get("payment_intent")
-            if isinstance(payment_intent, dict):
-                payment_intent = payment_intent.get("id")
-            if not payment_intent:
-                raise RuntimeError("Cancelled emergency payment is missing its payment intent")
-            try:
-                refund = await asyncio.to_thread(
-                    stripe_sdk.Refund.create,
-                    payment_intent=payment_intent,
-                    reason="requested_by_customer",
-                    api_key=_stripe_api_key(),
-                    idempotency_key=f"deleted-emergency-job-{session_id}",
-                )
-            except Exception as exc:
-                logger.error("Cancelled emergency payment refund failed: %s", type(exc).__name__)
-                raise RuntimeError("Cancelled emergency payment refund failed") from None
-            await db.payment_transactions.update_one(
-                {"session_id": session_id, "payment_status": "cancelled"},
-                {"$set": {"payment_status": "refunded", "provider_refund_id": refund.id,
-                          "refunded_at": now_str(), "updated_at": now_str()}})
+            await _refund_cancelled_emergency_payment(session_id, session)
         return
     if tx.get("payment_status") == "paid":
         return
@@ -499,7 +504,13 @@ async def _fulfill_stripe_checkout_session(session: dict) -> None:
     if plan in PLANS:
         await fulfill_subscription_tx(session_id)
     elif plan == "emergency_job":
-        await fulfill_emergency_tx(session_id)
+        fulfilled_job = await fulfill_emergency_tx(session_id)
+        if not fulfilled_job:
+            # The delete flow may have cancelled the transaction after our first read.
+            current_tx = await db.payment_transactions.find_one(
+                {"session_id": session_id}, {"_id": 0, "payment_status": 1, "plan": 1})
+            if current_tx and current_tx.get("payment_status") == "cancelled":
+                await _refund_cancelled_emergency_payment(session_id, session)
     elif plan == "boost":
         await _fulfill_boost_tx(session_id)
     elif plan == "verified_contractor":
