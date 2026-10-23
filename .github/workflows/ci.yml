@@ -1,0 +1,70 @@
+name: Backend and Frontend Tests
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend-regressions:
+    name: Backend regression tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      MONGO_URL: mongodb://127.0.0.1:27017
+      DB_NAME: daylaborcrew_ci
+      JWT_SECRET_KEY: ci-only-not-for-production-change-me-32
+      JWT_EXPIRE_HOURS: "24"
+      CORS_ORIGINS: http://localhost
+      EMERGENT_LLM_KEY: ci-placeholder-not-a-real-key
+      TRUSTED_PROXY_HOPS: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Compile backend modules
+        run: python -m compileall -q .
+      - name: Run hermetic backend regression tests
+        run: pytest -q tests/test_payment_security.py
+
+  frontend-tests:
+    name: Frontend tests and production build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      CI: "true"
+      NODE_OPTIONS: --openssl-legacy-provider
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: yarn
+          cache-dependency-path: frontend/package.json
+      - name: Enable Yarn classic
+        run: corepack enable
+      - name: Install frontend dependencies
+        run: yarn install --non-interactive --network-timeout 600000
+      - name: Run frontend tests
+        run: yarn test --watchAll=false --runInBand
+      - name: Build production frontend
+        run: yarn build
