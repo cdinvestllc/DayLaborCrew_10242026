@@ -1,8 +1,6 @@
 name: Legacy Backend Integration Tests (Staging)
 
 on:
-  push:
-    branches: [fix/payment-webhook-security-2026-10]
   workflow_dispatch:
     inputs:
       confirm_staging:
@@ -17,8 +15,11 @@ permissions:
 jobs:
   legacy-backend-staging:
     name: Legacy backend integration tests (isolated staging)
-    if: ${{ github.event_name == 'push' || inputs.confirm_staging }}
+    if: ${{ inputs.confirm_staging }}
     runs-on: ubuntu-latest
+    concurrency:
+      group: legacy-backend-staging
+      cancel-in-progress: false
     environment: staging
     defaults:
       run:
@@ -30,6 +31,13 @@ jobs:
       STAGING_MONGO_URL: ${{ secrets.STAGING_MONGO_URL }}
       STAGING_MONGO_HOST: ${{ vars.STAGING_MONGO_HOST }}
       STAGING_DB_NAME: ${{ vars.STAGING_DB_NAME }}
+      STAGING_JWT_SECRET_KEY: ${{ secrets.STAGING_JWT_SECRET_KEY }}
+      MONGO_URL: ${{ secrets.STAGING_MONGO_URL }}
+      DB_NAME: ${{ vars.STAGING_DB_NAME }}
+      JWT_SECRET_KEY: ${{ secrets.STAGING_JWT_SECRET_KEY }}
+      JWT_EXPIRE_HOURS: "24"
+      CORS_ORIGINS: ${{ vars.STAGING_WEB_ORIGIN }}
+      TRUSTED_PROXY_HOPS: "1"
       STAGING_STRIPE_MODE: ${{ vars.STAGING_STRIPE_MODE }}
       STAGING_SUPERADMIN_EMAIL: ${{ vars.STAGING_SUPERADMIN_EMAIL }}
       STAGING_SUPERADMIN_PASSWORD: ${{ secrets.STAGING_SUPERADMIN_PASSWORD }}

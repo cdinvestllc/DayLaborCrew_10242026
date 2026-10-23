@@ -3,7 +3,7 @@ import os
 import re
 from urllib.parse import urlsplit
 
-_STAGE_MARKER = re.compile(r"(^|[-.])(staging|stage|stg|test)([-.]|$)", re.IGNORECASE)
+_STAGE_MARKER = re.compile(r"(^|[-._])(staging|stage|stg|test)([-._]|$)", re.IGNORECASE)
 _PREVIEW_SUFFIX = ".preview.emergentagent.com"
 _SEEDED_ACCOUNTS = ("SUPERADMIN", "ADMIN", "CONTRACTOR1", "CONTRACTOR2", "CONTRACTOR3", "CREW", "CREW2")
 
@@ -66,6 +66,9 @@ def validate_staging_configuration() -> tuple[str, str, str]:
     api = get_staging_api_url()
     web = get_staging_web_origin()
     _, db_name = get_staging_mongo_settings()
+    stage_secret = _required("STAGING_JWT_SECRET_KEY")
+    if len(stage_secret) < 32:
+        raise RuntimeError("STAGING_JWT_SECRET_KEY must contain at least 32 characters.")
     if os.environ.get("STAGING_STRIPE_MODE", "").strip().lower() != "test":
         raise RuntimeError("STAGING_STRIPE_MODE must be explicitly set to 'test'.")
     for account in _SEEDED_ACCOUNTS:
