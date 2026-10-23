@@ -18,6 +18,7 @@ os.environ.setdefault("EMERGENT_LLM_KEY", "unit-test-only-key")
 os.environ.setdefault("TRUSTED_PROXY_HOPS", "1")
 
 from auth import limiter  # noqa: E402
+from routes import auth_routes as auth_routes  # noqa: E402
 from routes import payment_routes as payments  # noqa: E402
 
 
@@ -105,3 +106,15 @@ def test_paypal_webhook_payload_uses_configured_webhook_id_and_signed_headers():
     assert payload["webhook_id"] == "configured-hook"
     assert payload["webhook_event"] == event
     assert payload["transmission_sig"] == "signature"
+
+
+@pytest.mark.parametrize("role", ["crew", "contractor"])
+def test_google_signup_accepts_only_public_roles(role):
+    assert auth_routes.oauth_signup_role(role) == role
+
+
+@pytest.mark.parametrize("role", ["admin", "super_admin", "invalid", "", None])
+def test_google_signup_rejects_privileged_or_invalid_roles(role):
+    with pytest.raises(HTTPException) as err:
+        auth_routes.oauth_signup_role(role)
+    assert err.value.status_code == 400
