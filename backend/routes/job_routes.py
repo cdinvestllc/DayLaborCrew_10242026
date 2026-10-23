@@ -17,6 +17,7 @@ def now_str():
 
 
 CLOCK_IN_RADIUS_MILES = 0.5
+MAX_CLOCK_IN_ACCURACY_METERS = 250
 
 
 def validate_clock_in_location(job: dict, lat, lng, radius_miles: float = CLOCK_IN_RADIUS_MILES) -> float:
@@ -361,6 +362,11 @@ async def clock_in_job(job_id: str, data: ClockInRequest, current_user: dict = D
         raise HTTPException(status_code=403, detail="Not a crew member on this job")
     if job.get("status") != "in_progress":
         raise HTTPException(status_code=400, detail="You can only clock in after the contractor starts the job")
+    if data.accuracy_meters is not None and data.accuracy_meters > MAX_CLOCK_IN_ACCURACY_METERS:
+        raise HTTPException(
+            status_code=400,
+            detail="Your GPS location is not accurate enough yet. Move outdoors or enable precise location, then try again."
+        )
 
     attendance_id = f"{job_id}:{current_user['id']}"
     existing = await db.job_attendance.find_one({"_id": attendance_id}, {"_id": 0, "checked_in_at": 1})
