@@ -175,7 +175,7 @@ export default function ProfilePage() {
     if (!user) return;
     fetchReferralInfo();
     fetchRatings();
-  }, [user?.id, fetchReferralInfo, fetchRatings]);
+  }, [user, fetchReferralInfo, fetchRatings]);
 
   const saveProfile = async () => {
     setLoading(true);
