@@ -4,7 +4,13 @@ import pytest
 from staging_config import (
     get_staging_api_url,
     get_staging_mongo_settings,
+    get_staging_payment_settings,
     validate_staging_configuration,
+)
+
+_PAYMENT_VARS = (
+    "STAGING_STRIPE_API_KEY", "STAGING_STRIPE_WEBHOOK_SECRET", "STAGING_STRIPE_WEBHOOK_ENDPOINT_ID",
+    "STAGING_PAYPAL_CLIENT_ID", "STAGING_PAYPAL_SECRET", "STAGING_PAYPAL_WEBHOOK_ID",
 )
 
 
@@ -34,6 +40,8 @@ def _valid_env(monkeypatch):
     }
     for name, value in values.items():
         monkeypatch.setenv(name, value)
+    for name in _PAYMENT_VARS:
+        monkeypatch.delenv(name, raising=False)
 
 
 def test_staging_configuration_accepts_only_explicit_isolated_targets(monkeypatch):
@@ -84,3 +92,52 @@ def test_live_stripe_mode_is_rejected(monkeypatch):
     monkeypatch.setenv("STAGING_STRIPE_MODE", "live")
     with pytest.raises(RuntimeError, match="must be explicitly set to 'test'"):
         validate_staging_configuration()
+
+
+def test_payment_settings_are_optional(monkeypatch):
+    _valid_env(monkeypatch)
+    p = get_staging_payment_settings()
+    assert not p["stripe_webhook_configured"] and not p["paypal_configured"]
+    validate_staging_configuration()
+
+
+def test_sandbox_payment_settings_accepted(monkeypatch):
+    _valid_env(monkeypatch)
+    monkeypatch.setenv("STAGING_STRIPE_API_KEY", "sk_test_abc")
+    monkeypatch.setenv("STAGING_STRIPE_WEBHOOK_SECRET", "whsec_abc")
+    monkeypatch.setenv("STAGING_STRIPE_WEBHOOK_ENDPOINT_ID", "we_abc")
+    monkeypatch.setenv("STAGING_PAYPAL_CLIENT_ID", "client")
+    monkeypatch.setenv("STAGING_PAYPAL_SECRET", "secret")
+    monkeypatch.setenv("STAGING_PAYPAL_WEBHOOK_ID", "WH-1")
+    p = get_staging_payment_settings()
+    assert p["stripe_webhook_configured"] and p["paypal_configured"] and p["paypal_webhook_configured"]
+
+
+def test_live_stripe_key_is_rejected_without_leaking_it(monkeypatch):
+    _valid_env(monkeypatch)
+    monkeypatch.setenv("STAGING_STRIPE_API_KEY", "sk_live_SUPERSECRET")
+    with pytest.raises(RuntimeError, match="test-mode key") as exc:
+        validate_staging_configuration()
+    assert "SUPERSECRET" not in str(exc.value)
+
+
+def test_malformed_stripe_webhook_values_rejected(monkeypatch):
+    _valid_env(monkeypatch)
+    monkeypatch.setenv("STAGING_STRIPE_WEBHOOK_SECRET", "not-a-secret")
+    with pytest.raises(RuntimeError, match="whsec_"):
+        get_staging_payment_settings()
+    monkeypatch.setenv("STAGING_STRIPE_WEBHOOK_SECRET", "whsec_ok")
+    monkeypatch.setenv("STAGING_STRIPE_WEBHOOK_ENDPOINT_ID", "we_abc")
+    with pytest.raises(RuntimeError, match="requires STAGING_STRIPE_API_KEY"):
+        get_staging_payment_settings()
+
+
+def test_partial_paypal_settings_rejected(monkeypatch):
+    _valid_env(monkeypatch)
+    monkeypatch.setenv("STAGING_PAYPAL_CLIENT_ID", "client")
+    with pytest.raises(RuntimeError, match="must be set together"):
+        get_staging_payment_settings()
+    monkeypatch.delenv("STAGING_PAYPAL_CLIENT_ID")
+    monkeypatch.setenv("STAGING_PAYPAL_WEBHOOK_ID", "WH-1")
+    with pytest.raises(RuntimeError, match="requires STAGING_PAYPAL_CLIENT_ID"):
+        get_staging_payment_settings()

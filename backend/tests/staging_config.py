@@ -64,10 +64,59 @@ def get_staging_mongo_settings() -> tuple[str, str]:
     return uri, db_name
 
 
+_STRIPE_PREFIXES = {
+    "STAGING_STRIPE_API_KEY": ("sk_test_", "rk_test_"),
+    "STAGING_STRIPE_WEBHOOK_SECRET": ("whsec_",),
+    "STAGING_STRIPE_WEBHOOK_ENDPOINT_ID": ("we_",),
+}
+_PAYPAL_NAMES = ("STAGING_PAYPAL_CLIENT_ID", "STAGING_PAYPAL_SECRET", "STAGING_PAYPAL_WEBHOOK_ID")
+
+
+def _optional(name: str) -> str:
+    return os.environ.get(name, "").strip()
+
+
+def get_staging_payment_settings() -> dict:
+    """Optional sandbox payment credentials for the staging environment.
+
+    All values are optional so the suite still runs before payment providers are
+    connected, but anything provided must be test/sandbox-only and complete.
+    Values are never included in error messages.
+    """
+    stripe = {name: _optional(name) for name in _STRIPE_PREFIXES}
+    for name, prefixes in _STRIPE_PREFIXES.items():
+        value = stripe[name]
+        if value and not value.startswith(prefixes):
+            if name == "STAGING_STRIPE_API_KEY":
+                raise RuntimeError("STAGING_STRIPE_API_KEY must be a Stripe test-mode key (sk_test_/rk_test_); live keys are refused.")
+            raise RuntimeError(f"{name} does not look like a Stripe value (expected prefix {prefixes[0]}).")
+    if stripe["STAGING_STRIPE_WEBHOOK_ENDPOINT_ID"] and not stripe["STAGING_STRIPE_API_KEY"]:
+        raise RuntimeError("STAGING_STRIPE_WEBHOOK_ENDPOINT_ID requires STAGING_STRIPE_API_KEY to verify the endpoint.")
+
+    paypal = {name: _optional(name) for name in _PAYPAL_NAMES}
+    if paypal["STAGING_PAYPAL_WEBHOOK_ID"] and not (paypal["STAGING_PAYPAL_CLIENT_ID"] and paypal["STAGING_PAYPAL_SECRET"]):
+        raise RuntimeError("STAGING_PAYPAL_WEBHOOK_ID requires STAGING_PAYPAL_CLIENT_ID and STAGING_PAYPAL_SECRET.")
+    if bool(paypal["STAGING_PAYPAL_CLIENT_ID"]) != bool(paypal["STAGING_PAYPAL_SECRET"]):
+        raise RuntimeError("STAGING_PAYPAL_CLIENT_ID and STAGING_PAYPAL_SECRET must be set together.")
+
+    return {
+        "stripe_api_key": stripe["STAGING_STRIPE_API_KEY"],
+        "stripe_webhook_secret": stripe["STAGING_STRIPE_WEBHOOK_SECRET"],
+        "stripe_webhook_endpoint_id": stripe["STAGING_STRIPE_WEBHOOK_ENDPOINT_ID"],
+        "paypal_client_id": paypal["STAGING_PAYPAL_CLIENT_ID"],
+        "paypal_secret": paypal["STAGING_PAYPAL_SECRET"],
+        "paypal_webhook_id": paypal["STAGING_PAYPAL_WEBHOOK_ID"],
+        "stripe_webhook_configured": bool(stripe["STAGING_STRIPE_WEBHOOK_SECRET"]),
+        "paypal_configured": bool(paypal["STAGING_PAYPAL_CLIENT_ID"]),
+        "paypal_webhook_configured": bool(paypal["STAGING_PAYPAL_WEBHOOK_ID"]),
+    }
+
+
 def validate_staging_configuration() -> tuple[str, str, str]:
     api = get_staging_api_url()
     web = get_staging_web_origin()
     _, db_name = get_staging_mongo_settings()
+    get_staging_payment_settings()
     stage_secret = _required("STAGING_JWT_SECRET_KEY")
     if len(stage_secret) < 32:
         raise RuntimeError("STAGING_JWT_SECRET_KEY must contain at least 32 characters.")

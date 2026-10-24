@@ -53,6 +53,13 @@ jobs:
       STAGING_CREW_PASSWORD: ${{ secrets.STAGING_CREW_PASSWORD }}
       STAGING_CREW2_EMAIL: ${{ vars.STAGING_CREW2_EMAIL }}
       STAGING_CREW2_PASSWORD: ${{ secrets.STAGING_CREW2_PASSWORD }}
+      # Optional sandbox payment credentials. Must be test/sandbox only; live keys are refused.
+      STAGING_STRIPE_API_KEY: ${{ secrets.STAGING_STRIPE_API_KEY }}
+      STAGING_STRIPE_WEBHOOK_SECRET: ${{ secrets.STAGING_STRIPE_WEBHOOK_SECRET }}
+      STAGING_STRIPE_WEBHOOK_ENDPOINT_ID: ${{ secrets.STAGING_STRIPE_WEBHOOK_ENDPOINT_ID }}
+      STAGING_PAYPAL_CLIENT_ID: ${{ secrets.STAGING_PAYPAL_CLIENT_ID }}
+      STAGING_PAYPAL_SECRET: ${{ secrets.STAGING_PAYPAL_SECRET }}
+      STAGING_PAYPAL_WEBHOOK_ID: ${{ secrets.STAGING_PAYPAL_WEBHOOK_ID }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -69,12 +76,18 @@ jobs:
           print(f"Validated staging web origin host: {web_host}")
           print(f"Validated isolated staging database name: {db_name}")
           print("Seeded test-account configuration is present; credential values were not printed.")
+          from staging_config import get_staging_payment_settings
+          p = get_staging_payment_settings()
+          print(f"Stripe sandbox key provided: {bool(p['stripe_api_key'])}; webhook secret provided: {p['stripe_webhook_configured']}")
+          print(f"PayPal sandbox configured: {p['paypal_configured']}; webhook provided: {p['paypal_webhook_configured']}")
           PY
       - name: Install backend test dependencies
         run: |
           python -m pip install --upgrade pip
           grep -v '^emergentintegrations==' requirements.txt > "$RUNNER_TEMP/requirements-ci.txt"
           pip install -r "$RUNNER_TEMP/requirements-ci.txt"
+      - name: Verify Stripe and PayPal sandbox webhooks point at staging
+        run: python tests/staging_payment_providers.py
       - name: Run legacy integration suite against staging
         run: |
           pytest -q \

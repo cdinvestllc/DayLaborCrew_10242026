@@ -19,6 +19,24 @@ Required environment secrets:
 - `STAGING_JWT_SECRET_KEY`: staging API JWT signing secret (at least 32 characters).
 - `STAGING_SUPERADMIN_PASSWORD`, `STAGING_ADMIN_PASSWORD`, `STAGING_CONTRACTOR1_PASSWORD`, `STAGING_CONTRACTOR2_PASSWORD`, `STAGING_CONTRACTOR3_PASSWORD`, `STAGING_CREW_PASSWORD`, `STAGING_CREW2_PASSWORD`: credentials for those seeded accounts.
 
+Optional sandbox payment secrets (validated when present; live keys are refused):
+- `STAGING_STRIPE_API_KEY`: Stripe **test-mode** secret key (`sk_test_`/`rk_test_`). Used to verify the webhook endpoint below.
+- `STAGING_STRIPE_WEBHOOK_SECRET`: signing secret (`whsec_`) of the test-mode webhook endpoint. Must equal the staging API's `STRIPE_WEBHOOK_SECRET`; enables the signed-webhook tests.
+- `STAGING_STRIPE_WEBHOOK_ENDPOINT_ID`: id (`we_`) of that endpoint. The workflow checks it is enabled, test mode, points at `STAGING_API_URL/api/payments/stripe/webhook`, and subscribes to `checkout.session.completed` + `checkout.session.async_payment_succeeded`.
+- `STAGING_PAYPAL_CLIENT_ID`, `STAGING_PAYPAL_SECRET`: PayPal **sandbox** app credentials (set both or neither). When set, the PayPal tests expect real sandbox orders instead of "not configured".
+- `STAGING_PAYPAL_WEBHOOK_ID`: sandbox webhook id pointing at `STAGING_API_URL/api/payments/paypal/webhook` with `PAYMENT.CAPTURE.COMPLETED`.
+
+These must match the staging API's own `STRIPE_API_KEY`, `STRIPE_WEBHOOK_SECRET`, `PAYPAL_CLIENT_ID`, `PAYPAL_SECRET`, `PAYPAL_WEBHOOK_ID` (with `STRIPE_MODE=test`, `PAYPAL_MODE=sandbox`).
+
+## Creating the staging copy (Emergent)
+
+1. Create a MongoDB Atlas cluster whose name contains `staging` (e.g. `daylabor-staging` → host `daylabor-staging.xxxxx.mongodb.net`). Create a database user, and allow GitHub Actions runners in Network Access (runner IPs change, so this usually means `0.0.0.0/0` with a strong, staging-only password).
+2. Import this GitHub repo into a **new** Emergent project and deploy it (separate deployment, separate secrets).
+3. In that deployment's Secrets set: `MONGO_URL` (Atlas URI), `DB_NAME=daylaborcrew_staging`, `JWT_SECRET_KEY` (= `STAGING_JWT_SECRET_KEY`), `CORS_ORIGINS` and `FRONTEND_URL` = `https://staging.thedaylaborers.com`, `SEED_DEMO_ACCOUNTS=false`, `STRIPE_MODE=test` + test Stripe/PayPal sandbox values, and `SUPER_ADMIN_*` / `ADMIN_*` = the staging staff accounts.
+4. Connect the custom domain `staging.thedaylaborers.com` (the default `*.emergent.host` name has no staging marker and is rejected by the gate).
+5. Seed the Atlas database with `python backend/scripts/seed_staging.py --reset` using the `STAGING_*` values, then `--check`.
+6. Add the variables/secrets to the GitHub `staging` environment and run the workflow.
+
 Also configure the staging deployment itself to use that database, the same JWT secret, and sandbox Stripe settings. The workflow validates the declared target, pinned Mongo host, database name and Stripe mode before attempting a test. The suites must not be run concurrently against one staging database because the security suite uses a cleanup prefix and other tests modify shared seeded-account state.
 
 ## One-command seeding (`backend/scripts/seed_staging.py`)

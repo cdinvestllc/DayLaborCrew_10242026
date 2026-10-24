@@ -1,11 +1,22 @@
 """Payment API integration checks. Run only via the manual staging workflow."""
+import hashlib
+import hmac
+import json
+import time
+
 import pytest
 import requests
 
-from staging_config import get_seeded_account, get_staging_api_url, get_staging_web_origin
+from staging_config import (
+    get_seeded_account,
+    get_staging_api_url,
+    get_staging_payment_settings,
+    get_staging_web_origin,
+)
 
 BASE_URL = get_staging_api_url()
 WEB_ORIGIN = get_staging_web_origin()
+PAYMENTS = get_staging_payment_settings()
 API = f"{BASE_URL}/api/payments"
 
 
@@ -134,6 +145,7 @@ class TestOtherStripeCheckouts:
 
 
 # PayPal not configured -> graceful 503s
+@pytest.mark.skipif(PAYMENTS["paypal_configured"], reason="staging PayPal sandbox is configured")
 class TestPayPalUnconfigured:
     def test_create_order(self, crew):
         r = checkout(crew, method="paypal")
@@ -148,6 +160,72 @@ class TestPayPalUnconfigured:
         r = contractor.post(f"{API}/boost/paypal/{jobs[0]['id']}", json={"origin_url": BASE_URL})
         assert r.status_code == 503 and "PayPal is not configured" in r.json()["detail"]
 
+    @pytest.mark.skipif(PAYMENTS["paypal_webhook_configured"], reason="staging PayPal webhook is configured")
     def test_paypal_webhook(self):
         r = requests.post(f"{API}/paypal/webhook", json={"event_type": "PAYMENT.CAPTURE.COMPLETED"})
         assert r.status_code == 503 and "PayPal webhook is not configured" in r.json()["detail"]
+
+
+# PayPal sandbox configured -> real sandbox orders, unsigned webhooks refused
+@pytest.mark.skipif(not PAYMENTS["paypal_configured"], reason="staging PayPal sandbox is not configured")
+class TestPayPalSandbox:
+    def test_create_order_returns_sandbox_approval(self, crew):
+        r = checkout(crew, method="paypal")
+        assert r.status_code == 200, r.text
+        d = r.json()
+        assert d["order_id"] and "sandbox.paypal.com" in (d.get("approve_url") or "")
+        assert d["final_amount"] == 19.99
+
+    def test_uncaptured_order_is_not_fulfilled(self, crew):
+        order_id = checkout(crew, method="paypal").json()["order_id"]
+        r = crew.post(f"{API}/paypal/capture/{order_id}?plan=crew_monthly", timeout=60)
+        # Not approved by a buyer -> PayPal refuses capture; nothing is granted.
+        assert r.status_code in (400, 402, 409, 422, 502), r.text
+
+    def test_boost_paypal_order(self, contractor):
+        jobs = contractor.get(f"{BASE_URL}/api/jobs/my-jobs").json()
+        job = next(j for j in jobs if j["status"] == "open")
+        r = contractor.post(f"{API}/boost/paypal/{job['id']}", json={"origin_url": BASE_URL}, timeout=60)
+        assert r.status_code == 200, r.text
+        assert "sandbox.paypal.com" in (r.json().get("approve_url") or "")
+
+    @pytest.mark.skipif(not PAYMENTS["paypal_webhook_configured"], reason="staging PayPal webhook is not configured")
+    def test_unsigned_webhook_rejected(self):
+        r = requests.post(f"{API}/paypal/webhook", json={"event_type": "PAYMENT.CAPTURE.COMPLETED"})
+        assert r.status_code == 400 and "Invalid PayPal webhook headers" in r.json()["detail"]
+
+
+def _stripe_signature(payload: bytes, secret: str) -> str:
+    ts = int(time.time())
+    sig = hmac.new(secret.encode(), f"{ts}.".encode() + payload, hashlib.sha256).hexdigest()
+    return f"t={ts},v1={sig}"
+
+
+# Stripe webhook secret configured -> signature is enforced end to end
+@pytest.mark.skipif(not PAYMENTS["stripe_webhook_configured"], reason="staging Stripe webhook secret is not configured")
+class TestStripeWebhookSigned:
+    def test_fake_signature_rejected(self):
+        r = requests.post(f"{API}/stripe/webhook", data=b'{}', headers={"Stripe-Signature": "t=1,v1=abc"})
+        assert r.status_code == 400
+
+    def test_correctly_signed_harmless_event_accepted(self):
+        payload = json.dumps({"id": "evt_staging_ci", "object": "event", "type": "customer.created",
+                              "data": {"object": {"object": "customer"}}}).encode()
+        r = requests.post(f"{API}/stripe/webhook", data=payload, headers={
+            "Content-Type": "application/json",
+            "Stripe-Signature": _stripe_signature(payload, PAYMENTS["stripe_webhook_secret"]),
+        })
+        assert r.status_code == 200, (r.status_code, "staging API STRIPE_WEBHOOK_SECRET must equal STAGING_STRIPE_WEBHOOK_SECRET")
+        assert r.json()["status"] == "ignored"
+
+    def test_signed_unpaid_checkout_grants_nothing(self, crew):
+        before = crew.get(f"{API}/subscription/status").json()
+        payload = json.dumps({"id": "evt_staging_ci_unpaid", "object": "event", "type": "checkout.session.completed",
+                              "data": {"object": {"object": "checkout.session", "id": "cs_test_ci", "payment_status": "unpaid"}}}).encode()
+        r = requests.post(f"{API}/stripe/webhook", data=payload, headers={
+            "Content-Type": "application/json",
+            "Stripe-Signature": _stripe_signature(payload, PAYMENTS["stripe_webhook_secret"]),
+        })
+        assert r.status_code == 200 and r.json()["status"] == "ignored"
+        after = crew.get(f"{API}/subscription/status").json()
+        assert after["plan"] == before["plan"] and after["subscription_end"] == before["subscription_end"]
