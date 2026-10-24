@@ -49,7 +49,7 @@ def test_staging_api_is_required_and_never_falls_back_to_preview(monkeypatch):
     monkeypatch.delenv("STAGING_API_URL", raising=False)
     with pytest.raises(RuntimeError, match="STAGING_API_URL is required"):
         get_staging_api_url()
-    monkeypatch.setenv("STAGING_API_URL", "https://crew-workforce.preview.emergentagent.com")
+    monkeypatch.setenv("STAGING_API_URL", "https://impost-crew.preview.emergentagent.com")
     with pytest.raises(RuntimeError, match="shared preview host"):
         get_staging_api_url()
 

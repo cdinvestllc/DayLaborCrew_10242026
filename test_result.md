@@ -113,7 +113,7 @@ backend:
     status_history:
         -working: false
         -agent: "user"
-        -comment: "Root cause: app opened at https://crew-workforce.preview.emergentagent.com, API is the id-based preview URL; CORS preflight returned 400 (origin not trusted). Also CSRF cookie unreadable cross-host. Fixed by trusting origin + CSRF lookup endpoint used by axios interceptor."
+        -comment: "Root cause: app opened at https://impost-crew.preview.emergentagent.com, API is the id-based preview URL; CORS preflight returned 400 (origin not trusted). Also CSRF cookie unreadable cross-host. Fixed by trusting origin + CSRF lookup endpoint used by axios interceptor."
 frontend:
   - task: "Demo account login + dashboard write actions from both preview URLs"
     implemented: true

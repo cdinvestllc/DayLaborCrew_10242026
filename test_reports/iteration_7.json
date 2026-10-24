@@ -24,5 +24,5 @@
   "seed_data_creation": "None kept. No TEST_iter jobs remain. 1 unpaid orphan emergency_job transaction deleted. Emergency fee is 2.99. contractor2 job_posts_used=1, contractor3 job_posts_used=1 (from the regular-job no-refund tests).",
   "retest_needed": false,
   "should_main_agent_self_test": false,
-  "context_for_next_testing_agent": "Run: REACT_APP_BACKEND_URL=https://crew-workforce.preview.emergentagent.com pytest backend/tests/test_iteration6_csrf_emergency.py backend/tests/test_iteration7_crew_status_refund.py. Use contractor2/3 for posting. Each regular-job test consumes 1 job post."
+  "context_for_next_testing_agent": "Run: REACT_APP_BACKEND_URL=https://impost-crew.preview.emergentagent.com pytest backend/tests/test_iteration6_csrf_emergency.py backend/tests/test_iteration7_crew_status_refund.py. Use contractor2/3 for posting. Each regular-job test consumes 1 job post."
 }

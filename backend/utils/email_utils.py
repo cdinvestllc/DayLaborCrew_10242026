@@ -97,7 +97,7 @@ async def send_bulk_email_to_users(users: list, subject: str, body: str) -> dict
 
 
 async def send_password_reset_email(email: str, name: str, token: str):
-    frontend_url = os.environ.get("FRONTEND_URL", "https://crew-workforce.preview.emergentagent.com")
+    frontend_url = os.environ.get("FRONTEND_URL", "https://impost-crew.preview.emergentagent.com")
     reset_url = f"{frontend_url}/auth?mode=reset&token={token}"
     html = f"""
     <div style="font-family:Inter,sans-serif;max-width:600px;margin:0 auto;background:#050A30;padding:40px;border-radius:12px">
@@ -121,7 +121,7 @@ async def send_job_cancelled_email(crew_email: str, crew_name: str, job_title: s
       <p style="color:#ccc">The job <strong style="color:#7EC8E3">{job_title}</strong> has been updated by the contractor.</p>
       {f'<p style="color:#ccc">Reason: {reason}</p>' if reason else ''}
       <p style="color:#ccc">Please check the app for other available jobs in your area.</p>
-      <a href="https://crew-workforce.preview.emergentagent.com/crew/dashboard" style="display:inline-block;background:#0000FF;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold;margin-top:16px">Find More Jobs</a>
+      <a href="https://impost-crew.preview.emergentagent.com/crew/dashboard" style="display:inline-block;background:#0000FF;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold;margin-top:16px">Find More Jobs</a>
       <p style="color:#666;margin-top:32px;font-size:12px">TheDayLaborers &mdash; A Blue Collar ME Company</p>
     </div>
     """
